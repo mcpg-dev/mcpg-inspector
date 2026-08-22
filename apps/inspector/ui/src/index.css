@@ -1,0 +1,13 @@
+@import '@mcpg/ui/globals.css';
+
+/* Fonts are loaded by main.tsx via @fontsource-variable; Tailwind v4
+ * reads these tokens through @mcpg/ui's @theme defaults. */
+:root {
+  --font-sans: 'Inter Variable', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono Variable', ui-monospace, SFMono-Regular, monospace;
+}
+
+html,
+body {
+  font-family: var(--font-sans);
+}
