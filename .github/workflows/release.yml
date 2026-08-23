@@ -31,4 +31,5 @@ jobs:
     with:
       tier: product
       has_image: true
+      extra_images: tui=mcpg-inspector-tui
     secrets: inherit

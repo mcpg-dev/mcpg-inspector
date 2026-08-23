@@ -55,7 +55,7 @@ RUN --mount=type=secret,id=sibling_fetch_token \
       git config --global credential.helper store; \
       printf 'https://x-access-token:%s@github.com\n' "$(cat /run/secrets/sibling_fetch_token)" > ~/.git-credentials; \
     fi; \
-    cargo build --release --features embedded-ui,tui --bin mcpg-inspector; \
+    cargo build --release --features embedded-ui,tui --bin mcpg-inspector --bin mcpg-inspector-tui; \
     rm -f ~/.git-credentials
 
 # ----------------------------------------------------------------------------
@@ -78,3 +78,24 @@ HEALTHCHECK --interval=30s --timeout=3s \
 # binary accordingly) — keep them in lockstep.
 ENTRYPOINT ["tini", "--"]
 CMD ["/usr/local/bin/mcpg-inspector", "serve"]
+
+# ----------------------------------------------------------------------------
+# Variant image: the interactive terminal client, published as
+# ghcr.io/mcpg-dev/mcpg-inspector-tui (see the extra-images pair). The tui
+# crate itself is a library — the standalone binary lives in this crate so
+# it can dial targets with the same engine the `tui` subcommand uses.
+# Run with a TTY:
+#
+#   docker run -it --rm ghcr.io/mcpg-dev/mcpg-inspector-tui <args>
+FROM debian:bookworm-slim AS tui
+LABEL org.opencontainers.image.title="mcpg-inspector-tui" \
+      org.opencontainers.image.description="MCP inspector for mcpg — interactive terminal client" \
+      org.opencontainers.image.licenses="Apache-2.0"
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates tini \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --create-home --uid 10001 mcpg
+COPY --from=build /src/target/release/mcpg-inspector-tui /usr/local/bin/mcpg-inspector-tui
+USER mcpg
+WORKDIR /home/mcpg
+ENTRYPOINT ["tini", "--", "mcpg-inspector-tui"]
