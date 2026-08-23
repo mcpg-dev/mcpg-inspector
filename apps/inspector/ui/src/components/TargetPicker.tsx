@@ -57,7 +57,10 @@ export function TargetPicker({
       >
         <StateDot target={selected} />
         <span className="font-medium">{selected?.name ?? 'no target'}</span>
-        <span className="max-w-64 truncate text-muted-foreground">
+        <span
+          className="max-w-64 truncate text-muted-foreground"
+          title={endpointOf(selected)}
+        >
           {endpointOf(selected)}
         </span>
         <span className="text-muted-foreground">▾</span>
@@ -86,7 +89,10 @@ export function TargetPicker({
                 >
                   <StateDot target={target} />
                   <span className="font-medium">{target.name}</span>
-                  <span className="min-w-0 flex-1 truncate text-muted-foreground">
+                  <span
+                    className="min-w-0 flex-1 truncate text-muted-foreground"
+                    title={endpointOf(target)}
+                  >
                     {endpointOf(target)}
                   </span>
                   <span className="text-muted-foreground">{stateLabel(target)}</span>

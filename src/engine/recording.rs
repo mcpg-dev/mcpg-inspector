@@ -2,8 +2,8 @@
 //!
 //! A recording is a file — NDJSON, one header then the frames as the wire log
 //! holds them. Sharing one is sending it. The inspector writes and reads
-//! recordings and stores none, which is what keeps RFC 0001 D7 ("nothing is
-//! persisted") true while still letting someone else look at what happened.
+//! recordings and stores none — nothing is persisted server-side — while
+//! still letting someone else look at what happened.
 //! See `docs/inspector/rfcs/0003-recording-replay.md`.
 //!
 //! Replaying is a target kind rather than a mode, so every surface the

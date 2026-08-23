@@ -56,8 +56,8 @@ mod bundled {
     use axum::response::{IntoResponse, Response};
     use include_dir::{Dir, include_dir};
 
-    /// The committed Vite output, included at compile time. Bazel
-    /// declares the whole tree as `compile_data` because this macro
+    /// The committed Vite output, included at compile time. The build
+    /// treats the whole tree as a compile input because this macro
     /// reads it from disk while compiling.
     static UI_DIR: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/static");
 

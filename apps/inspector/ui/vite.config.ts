@@ -5,7 +5,7 @@ import path from 'node:path';
 
 // Bundle output goes to ../server/static/ so the inspector binary can
 // embed it via include_dir at compile time. The built tree is
-// committed — Bazel declares it as compile_data and never runs Vite.
+// committed — the server build embeds it and never runs Vite.
 export default defineConfig({
   // Pin the project root so a build launched from the workspace root
   // still resolves index.html relative to this file.

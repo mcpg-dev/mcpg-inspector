@@ -1,4 +1,4 @@
-//! `/api/v1` — the contract from RFC 0001 §"API contract".
+//! `/api/v1` — the HTTP contract every inspector face drives.
 
 use std::convert::Infallible;
 

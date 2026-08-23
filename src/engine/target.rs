@@ -75,7 +75,7 @@ pub enum TargetKind {
         env: BTreeMap<String, String>,
     },
     /// A recorded exchange, replayed from a file. Dials nothing — which is
-    /// what makes it work with the server gone. See RFC 0003.
+    /// what makes it work with the server gone.
     Recording {
         path: String,
     },

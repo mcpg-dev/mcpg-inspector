@@ -1,6 +1,7 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api';
+import { bootTarget } from '@/lib/boot-target';
 import { ToolsPane } from '@/components/ToolsPane';
 import { ResourcesPane } from '@/components/ResourcesPane';
 import { PromptsPane } from '@/components/PromptsPane';
@@ -55,6 +56,39 @@ export function App() {
   const list = targets.data?.targets ?? [];
   const selected = list.find((t) => t.id === selectedId) ?? list[0];
 
+  // `?target=` boot flow: select the entry whose URL is BYTE-IDENTICAL
+  // (never "close enough" — a near-match across targets is how a crafted
+  // link lands someone on the wrong server), else add it through the same
+  // POST the form uses and connect. Interactive auth is never driven from
+  // here — a target that requires it stops at the existing auth UI. The
+  // banner below keeps the full URL visible so the person can read what
+  // the link pointed them at.
+  const [linkTarget, setLinkTarget] = useState<string | null>(null);
+  const bootHandled = useRef(false);
+  useEffect(() => {
+    if (bootHandled.current || bootTarget === null || targets.data === undefined) return;
+    bootHandled.current = true;
+    setLinkTarget(bootTarget);
+    const existing = targets.data.targets.find((t) => t.spec.url === bootTarget);
+    if (existing) {
+      setSelectedId(existing.id);
+      if (existing.session.state !== 'ready') connect.mutate(existing.id);
+      return;
+    }
+    api
+      .addTarget({ url: bootTarget })
+      .then((created) => {
+        setSelectedId(created.id);
+        refresh();
+        connect.mutate(created.id);
+      })
+      .catch(() => {
+        // Server-side validation refused it; the banner still shows the
+        // URL so the person sees what the link tried to add.
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [targets.data]);
+
   // Both of these live here rather than in a pane, because a pane unmounts
   // when you click another tab, and neither a held-open stream nor a record
   // of what you have done should end because you looked at something else.
@@ -83,6 +117,21 @@ export function App() {
     <div className="flex h-screen flex-col bg-background text-foreground">
       <header className="flex flex-wrap items-center gap-3 border-b border-border px-4 py-2">
         <h1 className="text-sm font-semibold">MCPG Inspector</h1>
+        {linkTarget !== null && (
+          <div
+            className="order-last flex w-full items-baseline gap-2 rounded border border-border bg-accent/40 px-2 py-1 text-xs"
+            data-testid="link-target-banner"
+          >
+            <span className="shrink-0 text-muted-foreground">opened from a link:</span>
+            <code className="min-w-0 break-all font-mono">{linkTarget}</code>
+            <button
+              className="ml-auto shrink-0 text-muted-foreground underline underline-offset-2"
+              onClick={() => setLinkTarget(null)}
+            >
+              dismiss
+            </button>
+          </div>
+        )}
 
         <TargetPicker
           targets={list}
