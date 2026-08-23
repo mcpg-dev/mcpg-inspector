@@ -1,0 +1,20 @@
+# The pnpm workspace SUBSET this mirror needs to build the embedded web UI:
+# the ui app plus @mcpg/ui, its only workspace dependency (source-only,
+# zero workspace deps of its own — the closure was computed, not assumed).
+#
+# Security override pins live in package.json `pnpm.overrides`, NOT here:
+# on pnpm 10 a yaml `overrides:` block is silently inert when the root
+# manifest carries a `pnpm` section, and that has bitten this codebase
+# before. A selftest asserts the seeded copies match the monorepo root.
+packages:
+  - apps/inspector/ui
+  - libs/ui
+
+linkWorkspacePackages: true
+
+# esbuild is the one that matters: vite dies without its postinstall.
+onlyBuiltDependencies:
+  - '@swc/core'
+  - esbuild
+  - sharp
+  - unrs-resolver
