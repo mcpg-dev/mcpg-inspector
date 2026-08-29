@@ -1,6 +1,6 @@
 [package]
 name = "mcpg-inspector"
-version = "0.1.0-beta.16"
+version = "0.1.0-beta.17"
 edition = "2024"
 license = "Apache-2.0"
 description = "MCP inspector for mcpg — web UI, TUI and scriptable CLI in one binary"
@@ -24,22 +24,22 @@ tui = ["dep:mcpg-inspector-tui"]
 
 [dependencies]
 include_dir = { version = "0.7", optional = true }
-mcpg-inspector-tui = { git = "https://github.com/mcpg-dev/mcpg-inspector-tui", tag = "v0.1.0-beta.16", version = "=0.1.0-beta.16", optional = true }
+mcpg-inspector-tui = { git = "https://github.com/mcpg-dev/mcpg-inspector-tui", tag = "v0.1.0-beta.17", version = "=0.1.0-beta.17", optional = true }
 async-stream = "0.3"
 async-trait = "0.1"
 axum = "0.8"
 clap = { version = "4", features = ["derive", "env", "wrap_help"] }
 futures = "0.3"
-mcpg-mcp-client = { git = "https://github.com/mcpg-dev/mcpg-mcp-client", tag = "v0.1.0-beta.16", version = "=0.1.0-beta.16" }
-mcpg-mcp-wire = { git = "https://github.com/mcpg-dev/mcpg-mcp-wire", tag = "v0.1.0-beta.16", version = "=0.1.0-beta.16" }
+mcpg-mcp-client = { git = "https://github.com/mcpg-dev/mcpg-mcp-client", tag = "v0.1.0-beta.17", version = "=0.1.0-beta.17" }
+mcpg-mcp-wire = { git = "https://github.com/mcpg-dev/mcpg-mcp-wire", tag = "v0.1.0-beta.17", version = "=0.1.0-beta.17" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
 serde_yaml = "0.9"
-mcpg-sensitive = { git = "https://github.com/mcpg-dev/mcpg-sensitive", tag = "v0.1.0-beta.16", version = "=0.1.0-beta.16" }
-mcpg-plugin-protocol = { git = "https://github.com/mcpg-dev/mcpg-plugin-protocol", tag = "v0.1.0-beta.16", version = "=0.1.0-beta.16" }
-mcpg-aauth-core = { git = "https://github.com/mcpg-dev/mcpg-aauth-core", tag = "v0.1.0-beta.16", version = "=0.1.0-beta.16" }
-mcpg-cli-core = { git = "https://github.com/mcpg-dev/mcpg-cli-core", tag = "v0.1.0-beta.16", version = "=0.1.0-beta.16", default-features = false, features = ["oidc"] }
+mcpg-sensitive = { git = "https://github.com/mcpg-dev/mcpg-sensitive", tag = "v0.1.0-beta.17", version = "=0.1.0-beta.17" }
+mcpg-plugin-protocol = { git = "https://github.com/mcpg-dev/mcpg-plugin-protocol", tag = "v0.1.0-beta.17", version = "=0.1.0-beta.17" }
+mcpg-aauth-core = { git = "https://github.com/mcpg-dev/mcpg-aauth-core", tag = "v0.1.0-beta.17", version = "=0.1.0-beta.17" }
+mcpg-cli-core = { git = "https://github.com/mcpg-dev/mcpg-cli-core", tag = "v0.1.0-beta.17", version = "=0.1.0-beta.17", default-features = false, features = ["oidc"] }
 url = "2"
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync"] }
