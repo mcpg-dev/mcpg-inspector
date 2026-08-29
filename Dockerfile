@@ -59,27 +59,6 @@ RUN --mount=type=secret,id=sibling_fetch_token \
     rm -f ~/.git-credentials
 
 # ----------------------------------------------------------------------------
-FROM debian:bookworm-slim AS runtime
-LABEL org.opencontainers.image.title="mcpg-inspector" \
-      org.opencontainers.image.description="MCP inspector for mcpg — web UI and API" \
-      org.opencontainers.image.licenses="Apache-2.0"
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates tini \
-    && rm -rf /var/lib/apt/lists/* \
-    && useradd --system --create-home --uid 10001 mcpg
-COPY --from=build /src/target/release/mcpg-inspector /usr/local/bin/mcpg-inspector
-USER mcpg
-WORKDIR /home/mcpg
-EXPOSE 7846
-HEALTHCHECK --interval=30s --timeout=3s \
-    CMD ["/usr/local/bin/mcpg-inspector", "--version"]
-# The binary stays in CMD, not ENTRYPOINT: this is the contract every
-# published inspector image has (and the helm chart's `args` name the
-# binary accordingly) — keep them in lockstep.
-ENTRYPOINT ["tini", "--"]
-CMD ["/usr/local/bin/mcpg-inspector", "serve"]
-
-# ----------------------------------------------------------------------------
 # Variant image: the interactive terminal client, published as
 # ghcr.io/mcpg-dev/mcpg-inspector-tui (see the extra-images pair). The tui
 # crate itself is a library — the standalone binary lives in this crate so
@@ -99,3 +78,27 @@ COPY --from=build /src/target/release/mcpg-inspector-tui /usr/local/bin/mcpg-ins
 USER mcpg
 WORKDIR /home/mcpg
 ENTRYPOINT ["tini", "--", "mcpg-inspector-tui"]
+
+# Stage order is a contract: the main image build passes no --target and
+# ships the LAST stage, while variants (extra-images pairs) name theirs
+# explicitly — so the server `runtime` stage stays final.
+# ----------------------------------------------------------------------------
+FROM debian:bookworm-slim AS runtime
+LABEL org.opencontainers.image.title="mcpg-inspector" \
+      org.opencontainers.image.description="MCP inspector for mcpg — web UI and API" \
+      org.opencontainers.image.licenses="Apache-2.0"
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates tini \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --create-home --uid 10001 mcpg
+COPY --from=build /src/target/release/mcpg-inspector /usr/local/bin/mcpg-inspector
+USER mcpg
+WORKDIR /home/mcpg
+EXPOSE 7846
+HEALTHCHECK --interval=30s --timeout=3s \
+    CMD ["/usr/local/bin/mcpg-inspector", "--version"]
+# The binary stays in CMD, not ENTRYPOINT: this is the contract every
+# published inspector image has (and the helm chart's `args` name the
+# binary accordingly) — keep them in lockstep.
+ENTRYPOINT ["tini", "--"]
+CMD ["/usr/local/bin/mcpg-inspector", "serve"]
