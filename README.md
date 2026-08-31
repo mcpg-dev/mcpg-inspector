@@ -13,7 +13,7 @@ all drive the same `/api/v1` surface this server exposes.
 Signed release tarballs live on this repository's Releases page. Install:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/mcpg-dev/source-code/main/install.sh | sh -s -- --bin mcpg-inspector
+curl -fsSL https://raw.githubusercontent.com/mcpg-dev/mcpg/main/install.sh | sh -s -- --bin mcpg-inspector
 ```
 
 This repository is a read-only mirror — issues welcome here, code
