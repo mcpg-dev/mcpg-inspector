@@ -75,7 +75,9 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --create-home --uid 10001 mcpg
 COPY --from=build /src/target/release/mcpg-inspector-tui /usr/local/bin/mcpg-inspector-tui
-USER mcpg
+# Numeric, not the name: kubelet's runAsNonRoot check refuses a
+# symbolic user because it cannot prove it is non-root.
+USER 10001:10001
 WORKDIR /home/mcpg
 ENTRYPOINT ["tini", "--", "mcpg-inspector-tui"]
 
@@ -92,7 +94,9 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --create-home --uid 10001 mcpg
 COPY --from=build /src/target/release/mcpg-inspector /usr/local/bin/mcpg-inspector
-USER mcpg
+# Numeric, not the name: kubelet's runAsNonRoot check refuses a
+# symbolic user because it cannot prove it is non-root.
+USER 10001:10001
 WORKDIR /home/mcpg
 EXPOSE 7846
 HEALTHCHECK --interval=30s --timeout=3s \
