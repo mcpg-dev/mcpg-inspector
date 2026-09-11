@@ -191,9 +191,12 @@ pub async fn guard(
         match session {
             Some(session) => {
                 request.extensions_mut().insert(Arc::clone(&session.engine));
-                request
-                    .extensions_mut()
-                    .insert(Identity::User(Arc::clone(&session)));
+                let identity = if session.is_visitor() {
+                    Identity::Visitor(Arc::clone(&session))
+                } else {
+                    Identity::User(Arc::clone(&session))
+                };
+                request.extensions_mut().insert(identity);
                 request.extensions_mut().insert(session);
             }
             None => {
@@ -215,15 +218,20 @@ pub async fn guard(
 /// Who is making a request, as the guard resolved them.
 ///
 /// Local runs have exactly one caller and every surface is theirs. A hosted
-/// instance has two kinds, and the difference between them is deliberately
-/// narrow: an anonymous caller may read anything the operator published, and
-/// may not make the service dial an address of their choosing.
+/// instance has three kinds, and the differences between them are
+/// deliberately narrow: an anonymous caller may read anything the operator
+/// published; a visitor additionally holds a private workspace that admits
+/// only the URL forms the operator listed; and neither may make the service
+/// dial an address of their own choosing.
 #[derive(Clone)]
 pub enum Identity {
     /// A local run: the operator who already holds the session token.
     Operator,
     /// A hosted caller who has not signed in.
     Anonymous,
+    /// A hosted caller without an account, in a workspace of their own
+    /// (see [`super::visitor`]).
+    Visitor(Arc<super::hosted::UserSession>),
     /// A hosted caller with a provider-verified identity.
     User(Arc<super::hosted::UserSession>),
 }
@@ -233,16 +241,18 @@ impl Identity {
     ///
     /// This is the abuse surface, and the only thing signing in buys: an
     /// outbound dialer on a public origin, driveable by anyone, is what
-    /// turns a developer tool into someone else's proxy.
+    /// turns a developer tool into someone else's proxy. A visitor's
+    /// workspace is not an exception to it — what a visitor may dial is
+    /// decided by the operator's list, never by the visitor.
     pub fn may_dial_arbitrary_targets(&self) -> bool {
-        !matches!(self, Self::Anonymous)
+        matches!(self, Self::Operator | Self::User(_))
     }
 
     /// The OIDC subject, when there is one.
     pub fn subject(&self) -> Option<&str> {
         match self {
-            Self::User(session) => Some(&session.subject),
-            Self::Operator | Self::Anonymous => None,
+            Self::User(session) => session.subject.as_deref(),
+            Self::Operator | Self::Anonymous | Self::Visitor(_) => None,
         }
     }
 }

@@ -12,6 +12,7 @@ pub mod auth;
 pub mod hosted;
 pub mod limit;
 pub mod routes;
+pub mod visitor;
 
 use std::sync::Arc;
 

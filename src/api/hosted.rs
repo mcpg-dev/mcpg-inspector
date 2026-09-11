@@ -15,6 +15,14 @@
 //!   this deployment free of a database, of tenant-scoped rows, and of a
 //!   secret at rest.
 //!
+//! A **visitor** is the one caller in between: no account, but a workspace
+//! of their own. It exists for a platform that points its gateways at this
+//! instance — the operator lists the URL forms those gateways take
+//! ([`super::visitor`]), and a caller who brings a matching URL gets a
+//! private, short-lived workspace holding it. Nothing else changes: the
+//! shared workspace stays read-only, and any other URL still needs an
+//! account.
+//!
 //! The OIDC client is `mcpg-cli-core`'s, the same one the control plane and
 //! `mcpg login` use, so a token this accepts is a token those accept.
 
@@ -30,15 +38,20 @@ use crate::engine::registry::{Engine, Mode};
 const PENDING_TTL: Duration = Duration::from_secs(10 * 60);
 /// How long a session survives without a request.
 const SESSION_IDLE_TTL: Duration = Duration::from_secs(12 * 3600);
+/// A visitor's workspace is one visit long: it is created by a link and
+/// nothing outlives the tab, so an idle one is dropped long before a signed-in
+/// session would be.
+const VISITOR_IDLE_TTL: Duration = Duration::from_secs(30 * 60);
 /// Cookie carrying the session id.
 pub const SESSION_COOKIE: &str = "mcpg_inspector_session";
 
-/// One signed-in user and the workspace that belongs to them.
+/// One caller and the workspace that belongs to them.
 pub struct UserSession {
     pub id: String,
-    /// OIDC `sub`. Stable for the user at this issuer, and the identity
-    /// everything else keys on.
-    pub subject: String,
+    /// OIDC `sub` for a signed-in user — stable for the user at this issuer,
+    /// and the identity everything else keys on. `None` for a visitor, who
+    /// has no account and whose workspace admits only operator-listed URLs.
+    pub subject: Option<String>,
     pub email: Option<String>,
     pub engine: Arc<Engine>,
     pub created: Instant,
@@ -46,12 +59,28 @@ pub struct UserSession {
 }
 
 impl UserSession {
+    pub fn is_visitor(&self) -> bool {
+        self.subject.is_none()
+    }
+
     fn touch(&self) {
         *self.last_seen.lock().expect("last_seen lock") = Instant::now();
     }
 
     fn idle_for(&self) -> Duration {
         self.last_seen.lock().expect("last_seen lock").elapsed()
+    }
+
+    fn idle_ttl(&self) -> Duration {
+        if self.is_visitor() {
+            VISITOR_IDLE_TTL
+        } else {
+            SESSION_IDLE_TTL
+        }
+    }
+
+    fn expired(&self) -> bool {
+        self.idle_for() > self.idle_ttl()
     }
 }
 
@@ -77,6 +106,13 @@ pub struct HostedAuth {
     frame_buffer: usize,
     max_sessions: usize,
     max_targets: usize,
+    /// URL forms a visitor may inspect without an account. Empty — the
+    /// default — means there are no visitors, only anonymous readers.
+    visitor_patterns: Vec<super::visitor::UrlPattern>,
+    /// Concurrent visitor workspaces; counted apart from signed-in sessions
+    /// so strangers arriving from links cannot exhaust the capacity that
+    /// users sign in for.
+    max_visitors: usize,
 }
 
 /// Why a login could not be completed. The wording is what a stranger sees,
@@ -121,7 +157,31 @@ impl HostedAuth {
             frame_buffer,
             max_sessions,
             max_targets,
+            visitor_patterns: Vec::new(),
+            max_visitors: 0,
         }
+    }
+
+    /// Admit visitors: a caller without an account who brings a URL matching
+    /// one of `patterns` gets a private workspace holding it. `max_visitors`
+    /// caps those workspaces (0 = unlimited).
+    pub fn with_visitor_targets(
+        mut self,
+        patterns: Vec<super::visitor::UrlPattern>,
+        max_visitors: usize,
+    ) -> Self {
+        self.visitor_patterns = patterns;
+        self.max_visitors = max_visitors;
+        self
+    }
+
+    /// The spec a visitor may register for `spec`'s URL, if the operator
+    /// listed its form. `None` is the ordinary refusal: sign in.
+    pub fn visitor_target(
+        &self,
+        spec: &crate::engine::target::TargetSpec,
+    ) -> Option<crate::engine::target::TargetSpec> {
+        super::visitor::admitted(spec, &self.visitor_patterns)
     }
 
     pub fn public_url(&self) -> &str {
@@ -204,16 +264,39 @@ impl HostedAuth {
     ) -> Result<Arc<UserSession>, LoginError> {
         self.sweep();
         let mut sessions = self.sessions.write().expect("sessions lock");
-        if let Some(existing) = sessions.values().find(|s| s.subject == subject) {
+        if let Some(existing) = sessions
+            .values()
+            .find(|s| s.subject.as_deref() == Some(subject.as_str()))
+        {
             existing.touch();
             return Ok(Arc::clone(existing));
         }
-        if self.max_sessions > 0 && sessions.len() >= self.max_sessions {
+        let signed_in = sessions.values().filter(|s| !s.is_visitor()).count();
+        if self.max_sessions > 0 && signed_in >= self.max_sessions {
             return Err(LoginError::Capacity);
         }
-        let id = mcpg_aauth_core::rand_token(256);
-        let session = Arc::new(UserSession {
-            id: id.clone(),
+        let session = self.new_session(Some(subject), email);
+        sessions.insert(session.id.clone(), Arc::clone(&session));
+        Ok(session)
+    }
+
+    /// Open a visitor's workspace. Never reused: a visitor has no identity to
+    /// reuse it by, and the cookie is the only handle there is.
+    pub fn open_visitor_session(&self) -> Result<Arc<UserSession>, LoginError> {
+        self.sweep();
+        let mut sessions = self.sessions.write().expect("sessions lock");
+        let visitors = sessions.values().filter(|s| s.is_visitor()).count();
+        if self.max_visitors > 0 && visitors >= self.max_visitors {
+            return Err(LoginError::Capacity);
+        }
+        let session = self.new_session(None, None);
+        sessions.insert(session.id.clone(), Arc::clone(&session));
+        Ok(session)
+    }
+
+    fn new_session(&self, subject: Option<String>, email: Option<String>) -> Arc<UserSession> {
+        Arc::new(UserSession {
+            id: mcpg_aauth_core::rand_token(256),
             subject,
             email,
             engine: Arc::new(
@@ -221,9 +304,7 @@ impl HostedAuth {
             ),
             created: Instant::now(),
             last_seen: Mutex::new(Instant::now()),
-        });
-        sessions.insert(id, Arc::clone(&session));
-        Ok(session)
+        })
     }
 
     /// Resolve a session id, refreshing its idle clock.
@@ -234,7 +315,7 @@ impl HostedAuth {
             .expect("sessions lock")
             .get(id)
             .cloned()?;
-        if session.idle_for() > SESSION_IDLE_TTL {
+        if session.expired() {
             return None;
         }
         session.touch();
@@ -276,8 +357,24 @@ impl HostedAuth {
         self.sessions.write().expect("sessions lock").remove(id);
     }
 
+    /// Signed-in sessions currently open.
     pub fn session_count(&self) -> usize {
-        self.sessions.read().expect("sessions lock").len()
+        self.sessions
+            .read()
+            .expect("sessions lock")
+            .values()
+            .filter(|s| !s.is_visitor())
+            .count()
+    }
+
+    /// Visitor workspaces currently open.
+    pub fn visitor_count(&self) -> usize {
+        self.sessions
+            .read()
+            .expect("sessions lock")
+            .values()
+            .filter(|s| s.is_visitor())
+            .count()
     }
 
     /// Drop expired logins-in-flight and idle sessions.
@@ -293,18 +390,28 @@ impl HostedAuth {
         self.sessions
             .write()
             .expect("sessions lock")
-            .retain(|_, s| s.idle_for() <= SESSION_IDLE_TTL);
+            .retain(|_, s| !s.expired());
     }
 
-    /// `Set-Cookie` for a freshly opened session.
+    /// `Set-Cookie` for a freshly opened signed-in session.
     pub fn session_cookie(&self, id: &str) -> String {
+        self.cookie(id, SESSION_IDLE_TTL)
+    }
+
+    /// `Set-Cookie` for a freshly opened visitor workspace. Same cookie,
+    /// shorter life — the browser forgets it when the server would.
+    pub fn visitor_cookie(&self, id: &str) -> String {
+        self.cookie(id, VISITOR_IDLE_TTL)
+    }
+
+    fn cookie(&self, id: &str, max_age: Duration) -> String {
         let secure = if self.cookie_secure() { "; Secure" } else { "" };
         // SameSite=Lax, not None: the cookie must survive the top-level
         // redirect back from the provider, and must not ride a cross-site
         // subrequest.
         format!(
             "{SESSION_COOKIE}={id}; HttpOnly{secure}; SameSite=Lax; Path=/; Max-Age={}",
-            SESSION_IDLE_TTL.as_secs()
+            max_age.as_secs()
         )
     }
 
@@ -436,6 +543,89 @@ mod tests {
         auth.end(&session.id);
         assert!(auth.lookup(&session.id).is_none());
         assert!(auth.lookup("not-a-session").is_none());
+    }
+
+    fn tenant_spec(url: &str) -> crate::engine::target::TargetSpec {
+        serde_json::from_value(serde_json::json!({ "url": url, "bearer": "s" })).unwrap()
+    }
+
+    fn with_visitors(max_visitors: usize) -> HostedAuth {
+        auth().with_visitor_targets(
+            vec![super::super::visitor::UrlPattern::parse("https://*.mcpg.cloud/mcp").unwrap()],
+            max_visitors,
+        )
+    }
+
+    /// A visitor's workspace is theirs alone and never the shared one, and a
+    /// visitor is not a signed-in user: no subject, no arbitrary dial.
+    #[test]
+    fn a_visitor_gets_a_private_workspace_without_an_identity() {
+        let auth = with_visitors(0);
+        let a = auth.open_visitor_session().unwrap();
+        let b = auth.open_visitor_session().unwrap();
+        assert_ne!(a.id, b.id, "visitors are never folded into one workspace");
+        assert!(a.is_visitor() && a.subject.is_none());
+        let spec = auth
+            .visitor_target(&tenant_spec("https://acme.mcpg.cloud/mcp"))
+            .expect("a listed URL is admitted");
+        assert_eq!(spec.bearer, None, "a visitor's credential is not kept");
+        a.engine.add_target(spec).unwrap();
+        assert_eq!(a.engine.list().len(), 1);
+        assert_eq!(b.engine.list().len(), 0);
+        assert_eq!(auth.visitor_count(), 2);
+        assert_eq!(
+            auth.session_count(),
+            0,
+            "visitors do not count as signed in"
+        );
+        assert!(auth.lookup(&a.id).is_some());
+    }
+
+    #[test]
+    fn without_patterns_nothing_is_admitted() {
+        let auth = auth();
+        assert!(
+            auth.visitor_target(&tenant_spec("https://acme.mcpg.cloud/mcp"))
+                .is_none()
+        );
+        let auth = with_visitors(0);
+        assert!(
+            auth.visitor_target(&tenant_spec("https://example.com/mcp"))
+                .is_none()
+        );
+    }
+
+    /// Visitors and signed-in users are capped apart, so a flood of links
+    /// cannot lock users out and users cannot lock visitors out.
+    #[test]
+    fn visitor_capacity_is_its_own() {
+        let auth = with_visitors(1);
+        auth.open_visitor_session().unwrap();
+        assert!(matches!(
+            auth.open_visitor_session(),
+            Err(LoginError::Capacity)
+        ));
+        // Two signed-in sessions are the cap `auth()` sets; the visitor
+        // occupies neither slot.
+        auth.open_session("a".into(), None).unwrap();
+        auth.open_session("b".into(), None).unwrap();
+        assert!(matches!(
+            auth.open_session("c".into(), None),
+            Err(LoginError::Capacity)
+        ));
+    }
+
+    #[test]
+    fn the_visitor_cookie_is_the_session_cookie_with_a_shorter_life() {
+        let auth = with_visitors(0);
+        let cookie = auth.visitor_cookie("abc");
+        assert!(cookie.starts_with("mcpg_inspector_session=abc"));
+        assert!(cookie.contains("HttpOnly"), "{cookie}");
+        assert!(
+            cookie.contains(&format!("Max-Age={}", VISITOR_IDLE_TTL.as_secs())),
+            "{cookie}"
+        );
+        assert!(VISITOR_IDLE_TTL < SESSION_IDLE_TTL);
     }
 
     #[test]

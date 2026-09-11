@@ -86,4 +86,21 @@ pub struct ServeArgs {
     /// Targets one signed-in user may hold at once; 0 is unlimited.
     #[arg(long, env = "MCPG_INSPECTOR_MAX_TARGETS", default_value_t = 20)]
     pub max_targets: usize,
+
+    /// URL form (repeatable) a visitor may inspect without an account, in
+    /// a private workspace of their own — e.g. `https://*.mcpg.cloud/mcp`,
+    /// where `*` stands for exactly one host label. Any other URL still
+    /// requires signing in. Hosted mode only.
+    #[arg(
+        long = "visitor-target-pattern",
+        env = "MCPG_INSPECTOR_VISITOR_TARGET_PATTERNS",
+        value_name = "URL",
+        value_delimiter = ','
+    )]
+    pub visitor_target_patterns: Vec<String>,
+
+    /// Concurrent visitor workspaces; 0 is unlimited. Counted apart from
+    /// signed-in sessions.
+    #[arg(long, env = "MCPG_INSPECTOR_MAX_VISITORS", default_value_t = 1000)]
+    pub max_visitors: usize,
 }

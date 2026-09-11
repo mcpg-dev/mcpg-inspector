@@ -77,23 +77,74 @@ async fn list_targets(Workspace(engine): Workspace) -> Json<Value> {
 }
 
 async fn add_target(
+    State(state): State<ApiState>,
     Workspace(engine): Workspace,
     axum::Extension(identity): axum::Extension<crate::api::auth::Identity>,
     Json(spec): Json<TargetSpec>,
-) -> Result<Json<Value>, Response> {
+) -> Result<Response, Response> {
+    use crate::api::auth::Identity;
+    use axum::response::IntoResponse;
+
     // Registering a target is the stateful twin of `exec` with an inline
     // target: both end in the service dialling an address the caller chose.
-    if !identity.may_dial_arbitrary_targets() {
-        return Err(fail(
-            StatusCode::UNAUTHORIZED,
-            "sign_in_required",
-            "sign in to inspect a server of your own —              the pre-configured ones need no account",
-        ));
+    if identity.may_dial_arbitrary_targets() {
+        return Ok(Json(register(&engine, spec)?).into_response());
     }
-    let entry = engine
+    // Without an account the URL has to be one the operator listed, and it
+    // lands in a workspace of the caller's own — never the shared one: a
+    // target holds ONE MCP session, so two strangers on a shared entry would
+    // share it, and one could answer the other's elicitation.
+    let admitted = state
+        .auth
+        .hosted()
+        .and_then(|hosted| hosted.visitor_target(&spec))
+        .ok_or_else(sign_in_required)?;
+    match identity {
+        // The guard already resolved the visitor's own workspace.
+        Identity::Visitor(_) => Ok(Json(register(&engine, admitted)?).into_response()),
+        Identity::Anonymous => {
+            let hosted = state
+                .auth
+                .hosted()
+                .expect("anonymous callers exist only under OIDC");
+            let session = hosted.open_visitor_session().map_err(|e| {
+                fail(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "at_capacity",
+                    &e.to_string(),
+                )
+            })?;
+            let described = register(&session.engine, admitted)?;
+            tracing::info!("visitor workspace opened");
+            Ok((
+                [(
+                    axum::http::header::SET_COOKIE,
+                    hosted.visitor_cookie(&session.id),
+                )],
+                Json(described),
+            )
+                .into_response())
+        }
+        Identity::Operator | Identity::User(_) => unreachable!("arbitrary dialers returned above"),
+    }
+}
+
+/// Same error type as [`target`], for the same reason.
+#[allow(clippy::result_large_err)]
+fn register(engine: &Engine, spec: TargetSpec) -> Result<Value, Response> {
+    engine
         .add_target(spec)
-        .map_err(|message| fail(StatusCode::BAD_REQUEST, "invalid_target", &message))?;
-    Ok(Json(entry.describe()))
+        .map(|entry| entry.describe())
+        .map_err(|message| fail(StatusCode::BAD_REQUEST, "invalid_target", &message))
+}
+
+fn sign_in_required() -> Response {
+    fail(
+        StatusCode::UNAUTHORIZED,
+        "sign_in_required",
+        "sign in to inspect a server of your own — \
+         the pre-configured ones need no account",
+    )
 }
 
 async fn get_target(
@@ -416,15 +467,18 @@ async fn exec(
         }
         (Some(id), None) => target(&engine, id)?.spec.clone(),
         (None, Some(spec)) => {
-            if !identity.may_dial_arbitrary_targets() {
-                return Err(fail(
-                    StatusCode::UNAUTHORIZED,
-                    "sign_in_required",
-                    "sign in to inspect a server of your own — \
-                     the pre-configured ones need no account",
-                ));
-            }
-            let mut spec = spec.clone();
+            // Without an account the inline form is admitted on the same
+            // terms as a registered one: an operator-listed URL, stripped
+            // to the URL.
+            let mut spec = if identity.may_dial_arbitrary_targets() {
+                spec.clone()
+            } else {
+                state
+                    .auth
+                    .hosted()
+                    .and_then(|hosted| hosted.visitor_target(spec))
+                    .ok_or_else(sign_in_required)?
+            };
             // The hosted profile applies to a supplied target exactly as it
             // does to a registered one: no process spawning, and no reach
             // into private address space. Overridden rather than validated,

@@ -67,6 +67,15 @@ async fn serve(args: &ServeArgs) -> std::io::Result<()> {
                 .to_owned(),
         ));
     }
+    // A local run has one operator and no visitors; a pattern that silently
+    // did nothing would look like a working allow-list.
+    if !args.hosted && !args.visitor_target_patterns.is_empty() {
+        return Err(invalid(
+            "--visitor-target-pattern applies to --hosted only: a local run \
+             has no callers without an account"
+                .to_owned(),
+        ));
+    }
 
     let engine = Arc::new(Engine::new(
         if args.hosted {
@@ -330,7 +339,10 @@ async fn auth_callback(
 
     match hosted.complete(&code, &oauth_state).await {
         Ok((session, next)) => {
-            tracing::info!(subject = %session.subject, "session opened");
+            tracing::info!(
+                subject = session.subject.as_deref().unwrap_or_default(),
+                "session opened"
+            );
             (
                 [(
                     axum::http::header::SET_COOKIE,
@@ -431,6 +443,12 @@ fn hosted_auth(args: &ServeArgs) -> std::io::Result<crate::api::hosted::HostedAu
             "--public-url must be an absolute http(s) URL".to_owned(),
         ));
     }
+    let patterns = args
+        .visitor_target_patterns
+        .iter()
+        .map(|p| crate::api::visitor::UrlPattern::parse(p))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(invalid)?;
     Ok(crate::api::hosted::HostedAuth::new(
         issuer,
         client_id,
@@ -439,7 +457,8 @@ fn hosted_auth(args: &ServeArgs) -> std::io::Result<crate::api::hosted::HostedAu
         args.frame_buffer,
         args.max_sessions,
         args.max_targets,
-    ))
+    )
+    .with_visitor_targets(patterns, args.max_visitors))
 }
 
 /// This instance's OAuth client-metadata document.

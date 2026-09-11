@@ -16,6 +16,7 @@ export function TargetPicker({
   onSelect,
   onAdd,
   addError,
+  signInHref,
   busy,
 }: {
   targets: Target[];
@@ -23,6 +24,8 @@ export function TargetPicker({
   onSelect: (id: string) => void;
   onAdd: (url: string) => void;
   addError?: string;
+  /** Where signing in happens, when the refusal was a sign-in matter. */
+  signInHref?: string;
   busy?: boolean;
 }) {
   const [open, setOpen] = useState(false);
@@ -133,6 +136,14 @@ export function TargetPicker({
           {addError && (
             <p className="px-2 pb-2 text-xs text-destructive" data-testid="add-target-error">
               {addError}
+              {signInHref && (
+                <>
+                  {' '}
+                  <a className="underline" href={signInHref} data-testid="sign-in">
+                    Sign in
+                  </a>
+                </>
+              )}
             </p>
           )}
         </div>

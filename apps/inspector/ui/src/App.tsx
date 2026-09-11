@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { api } from '@/lib/api';
+import { ApiError, api } from '@/lib/api';
 import { bootTarget } from '@/lib/boot-target';
 import { ToolsPane } from '@/components/ToolsPane';
 import { ResourcesPane } from '@/components/ResourcesPane';
@@ -139,6 +139,13 @@ export function App() {
           onSelect={setSelectedId}
           onAdd={(url) => addTarget.mutate(url)}
           addError={addTarget.error ? (addTarget.error as Error).message : undefined}
+          // The refusal says "sign in"; this is the thing to click. Hosted
+          // only — a local run has no sign-in and never returns this code.
+          signInHref={
+            addTarget.error instanceof ApiError && addTarget.error.code === 'sign_in_required'
+              ? `/auth/login?next=${encodeURIComponent(window.location.pathname)}`
+              : undefined
+          }
           busy={addTarget.isPending}
         />
 
