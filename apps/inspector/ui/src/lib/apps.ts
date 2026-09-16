@@ -143,5 +143,13 @@ export function readBridgeCall(data: unknown): BridgeCall | null {
   };
 }
 
+/** The app dialect this host speaks (SEP-1865 postMessage protocol version). */
+export const APP_PROTOCOL_VERSION = '2026-01-26';
+
 /** The methods this host answers. Anything else is refused by name. */
-export const HOST_METHODS = ['tools/call', 'ui/ready'] as const;
+export const HOST_METHODS = [
+  'tools/call',
+  'ui/initialize',
+  'ui/ready',
+  'ui/update-model-context',
+] as const;

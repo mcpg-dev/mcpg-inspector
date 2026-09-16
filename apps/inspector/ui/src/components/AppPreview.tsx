@@ -5,6 +5,7 @@ import {
   type AppDeclaration,
   allowFor,
   appOf,
+  APP_PROTOCOL_VERSION,
   cspFor,
   declarationOf,
   documentFor,
@@ -73,9 +74,35 @@ export function AppPreview({
         frame.current?.contentWindow?.postMessage({ jsonrpc: '2.0', id: call.id, ...body }, '*');
 
       const at = new Date().toLocaleTimeString();
-      if (call.method === 'ui/ready') {
-        setAsked((prev) => [...prev, { method: call.method, detail: 'the app reported ready', at }]);
-        reply({ result: {} });
+      // SEP-1865 opens with `ui/initialize`; `ui/ready` is the older spelling
+      // some apps still send. Both mean the same thing here: the frame is
+      // alive and wants to know what it is talking to.
+      if (call.method === 'ui/initialize' || call.method === 'ui/ready') {
+        setAsked((prev) => [...prev, { method: call.method, detail: 'the app opened the bridge', at }]);
+        reply({
+          result: {
+            protocolVersion: APP_PROTOCOL_VERSION,
+            hostCapabilities: { tools: true },
+            hostContext: { host: 'mcpg-inspector' },
+          },
+        });
+        return;
+      }
+      // Notifications carry no id and want no answer. They are still shown:
+      // what an app tells the host about itself is the interesting half.
+      if (call.id === null && call.method.startsWith('ui/notifications/')) {
+        setAsked((prev) => [
+          ...prev,
+          { method: call.method, detail: JSON.stringify(call.params ?? {}), at },
+        ]);
+        return;
+      }
+      if (call.method === 'ui/update-model-context') {
+        setAsked((prev) => [
+          ...prev,
+          { method: call.method, detail: JSON.stringify(call.params ?? {}), at },
+        ]);
+        if (call.id !== null) reply({ result: {} });
         return;
       }
       if (call.method === 'tools/call') {
