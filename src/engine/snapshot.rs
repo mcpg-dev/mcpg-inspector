@@ -76,14 +76,24 @@ fn hash_json(value: &Value) -> String {
         other => {
             let mut hasher = Sha256::new();
             hasher.update(other.to_string().as_bytes());
-            return format!("{:x}", hasher.finalize())[..16].to_owned();
+            return hasher
+                .finalize()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()[..16]
+                .to_owned();
         }
     };
     sorted.sort_by(|a, b| a.0.cmp(&b.0));
     let rebuilt = Value::Object(sorted.into_iter().collect());
     let mut hasher = Sha256::new();
     hasher.update(rebuilt.to_string().as_bytes());
-    format!("{:x}", hasher.finalize())[..16].to_owned()
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>()[..16]
+        .to_owned()
 }
 
 fn hash_opt(value: Option<&Value>) -> Option<String> {
