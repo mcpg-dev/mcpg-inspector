@@ -5,8 +5,12 @@
 pub mod aauth;
 pub mod authlab;
 pub mod checks;
+pub mod client_auth;
+pub mod dpop;
 pub mod eventlog;
 pub mod gateway;
+pub mod idjag;
+pub mod keys;
 pub mod mcpgconfig;
 pub mod oauth;
 pub mod ops;

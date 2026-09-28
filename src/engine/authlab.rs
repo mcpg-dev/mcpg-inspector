@@ -10,14 +10,15 @@
 //! would do.
 
 use mcpg_mcp_client::auth::{
-    BearerChallenge, DiscoveryPolicy, DiscoveryStep, discover_oauth_traced,
+    BearerChallenge, DiscoveredOauth, DiscoveryPolicy, DiscoveryStep, IdJagSupport,
+    discover_oauth_traced,
 };
 use serde::Serialize;
 
 use super::target::{TargetKind, TargetSpec};
 
 /// What the lab found out about a target's authorization.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Default, Serialize)]
 pub struct AuthReport {
     /// HTTP status the bare probe got back.
     pub probe_status: u16,
@@ -27,6 +28,10 @@ pub struct AuthReport {
     pub answered_without_credential: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub www_authenticate: Option<String>,
+    /// The `WWW-Authenticate: DPoP` challenge, verbatim, when the resource
+    /// sends one beside the Bearer challenge (RFC 9449 §7.1).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dpop_challenge: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub challenge: Option<BearerChallenge>,
     pub discovery: Vec<DiscoveryStep>,
@@ -34,6 +39,44 @@ pub struct AuthReport {
     pub resource: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token_endpoint: Option<String>,
+    /// The AS issuer: the hop-1 `audience` an ID-JAG must carry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issuer: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub grant_types_supported: Vec<String>,
+    /// Lists `urn:ietf:params:oauth:grant-profile:id-jag` when the AS
+    /// redeems ID-JAGs (enterprise-managed authorization).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub authorization_grant_profiles_supported: Vec<String>,
+    /// How far the AS commits to redeeming ID-JAGs: `advertised` (the
+    /// id-jag grant profile), `jwt-bearer-only` (the grant without the
+    /// profile) or `unsupported`. Absent when no AS metadata was read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enterprise_managed_authorization: Option<&'static str>,
+    /// Where a browser sign-in starts. Absent on an AS that issues tokens
+    /// machine to machine only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authorization_endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub registration_endpoint: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub client_id_metadata_document_supported: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub token_endpoint_auth_methods_supported: Vec<String>,
+    /// RFC 9449: the proof algorithms the AS accepts; empty when it binds
+    /// no token to a key.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub dpop_signing_alg_values_supported: Vec<String>,
+    /// RFC 9396: the `authorization_details` types the AS takes.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub authorization_details_types_supported: Vec<String>,
+    /// RFC 9207: the AS names itself in every authorization response.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub authorization_response_iss_parameter_supported: bool,
+    /// What the protected resource metadata says about the tokens the
+    /// resource takes, when it says anything.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_token_requirements: Option<ResourceTokenRequirements>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub discovery_error: Option<String>,
     /// AAuth posture, when the target shows any sign of speaking it.
@@ -41,6 +84,37 @@ pub struct AuthReport {
     pub aauth: Option<AauthPosture>,
     /// What an operator should do next, in one line.
     pub verdict: String,
+}
+
+/// RFC 9728 §2 members about the tokens a resource takes.
+#[derive(Debug, Default, Serialize)]
+pub struct ResourceTokenRequirements {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub dpop_signing_alg_values_supported: Vec<String>,
+    /// Only DPoP-bound tokens are accepted; a bearer token is refused.
+    pub dpop_bound_access_tokens_required: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub authorization_details_types_supported: Vec<String>,
+}
+
+impl ResourceTokenRequirements {
+    fn of(found: &DiscoveredOauth) -> Option<Self> {
+        let requirements = Self {
+            dpop_signing_alg_values_supported: found
+                .resource_dpop_signing_alg_values_supported
+                .clone(),
+            dpop_bound_access_tokens_required: found.resource_dpop_bound_access_tokens_required,
+            authorization_details_types_supported: found
+                .resource_authorization_details_types_supported
+                .clone(),
+        };
+        (requirements.dpop_bound_access_tokens_required
+            || !requirements.dpop_signing_alg_values_supported.is_empty()
+            || !requirements
+                .authorization_details_types_supported
+                .is_empty())
+        .then_some(requirements)
+    }
 }
 
 /// What a target says about AAuth.
@@ -121,11 +195,26 @@ pub async fn inspect(spec: &TargetSpec) -> Result<AuthReport, String> {
         .map_err(|e| format!("probe request to {url} failed: {e}"))?;
 
     let probe_status = resp.status().as_u16();
-    let www_authenticate = resp
+    // A resource may challenge once per scheme (RFC 9449 §7.1): the Bearer
+    // challenge is the one discovery reads; a DPoP one is reported as sent.
+    let challenges: Vec<String> = resp
         .headers()
-        .get("www-authenticate")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_owned);
+        .get_all("www-authenticate")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .map(str::to_owned)
+        .collect();
+    let is_dpop = |value: &&String| {
+        value
+            .get(..5)
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("dpop "))
+    };
+    let dpop_challenge = challenges.iter().find(is_dpop).cloned();
+    let www_authenticate = challenges
+        .iter()
+        .find(|value| !is_dpop(value))
+        .or(challenges.first())
+        .cloned();
     let challenge = www_authenticate.as_deref().and_then(BearerChallenge::parse);
     let resp_headers = resp.headers().clone();
 
@@ -146,33 +235,88 @@ pub async fn inspect(spec: &TargetSpec) -> Result<AuthReport, String> {
         .unwrap_or_else(|| url.clone());
     let (discovery, outcome) = discover_oauth_traced(&discovery_base, policy).await;
 
-    let (resource, token_endpoint, discovery_error) = match outcome {
-        Ok(found) => (Some(found.resource), Some(found.token_endpoint), None),
-        Err(e) => (None, None, Some(e)),
+    let (found, discovery_error) = match outcome {
+        Ok(found) => (Some(found), None),
+        Err(e) => (None, Some(e)),
     };
 
     let aauth = aauth_posture(&client, url, resp_headers).await;
 
-    let verdict = verdict(
+    let mut verdict = verdict(
         probe_status,
         challenge.as_ref(),
-        token_endpoint.as_deref(),
+        found.as_ref().map(|f| f.token_endpoint.as_str()),
         &discovery,
         aauth.as_ref(),
     );
+    if let Some(found) = &found {
+        verdict.push_str(&oauth_hints(found));
+    }
 
-    Ok(AuthReport {
+    let mut report = AuthReport {
         probe_status,
         answered_without_credential: (200..300).contains(&probe_status),
         www_authenticate,
+        dpop_challenge,
         challenge,
         discovery,
-        resource,
-        token_endpoint,
         discovery_error,
         aauth,
         verdict,
-    })
+        ..Default::default()
+    };
+    if let Some(found) = found {
+        report.enterprise_managed_authorization = Some(match found.id_jag_support() {
+            IdJagSupport::Advertised => "advertised",
+            IdJagSupport::JwtBearerOnly => "jwt-bearer-only",
+            IdJagSupport::Unsupported => "unsupported",
+        });
+        report.resource_token_requirements = ResourceTokenRequirements::of(&found);
+        report.resource = Some(found.resource);
+        report.token_endpoint = Some(found.token_endpoint);
+        report.issuer = Some(found.issuer);
+        report.grant_types_supported = found.grant_types_supported;
+        report.authorization_grant_profiles_supported =
+            found.authorization_grant_profiles_supported;
+        report.authorization_endpoint = found.authorization_endpoint;
+        report.registration_endpoint = found.registration_endpoint;
+        report.client_id_metadata_document_supported = found.client_id_metadata_document_supported;
+        report.token_endpoint_auth_methods_supported = found.token_endpoint_auth_methods_supported;
+        report.dpop_signing_alg_values_supported = found.dpop_signing_alg_values_supported;
+        report.authorization_details_types_supported = found.authorization_details_types_supported;
+        report.authorization_response_iss_parameter_supported =
+            found.authorization_response_iss_parameter_supported;
+    }
+    Ok(report)
+}
+
+/// What else the verdict says about a discovered authorization server:
+/// which logins it takes, and whether its tokens must be DPoP-bound.
+fn oauth_hints(found: &DiscoveredOauth) -> String {
+    let mut logins = Vec::new();
+    if found.authorization_endpoint.is_some() {
+        logins.push("a browser sign-in (`login`)");
+    }
+    match found.id_jag_support() {
+        IdJagSupport::Advertised => {
+            logins.push("an ID-JAG from your IdP (`login --idp-token-url`, enterprise-managed)")
+        }
+        IdJagSupport::JwtBearerOnly => logins.push(
+            "an ID-JAG from your IdP (`login --idp-token-url`; the jwt-bearer grant is listed, \
+             the id-jag profile is not)",
+        ),
+        IdJagSupport::Unsupported => {}
+    }
+    let mut hints = String::new();
+    if !logins.is_empty() {
+        hints.push_str(&format!("; it takes {}", logins.join(" or ")));
+    }
+    if found.resource_dpop_bound_access_tokens_required {
+        hints.push_str("; its tokens must be DPoP-bound (`--dpop-key`)");
+    } else if !found.dpop_signing_alg_values_supported.is_empty() {
+        hints.push_str("; it binds tokens to a DPoP key on request (`--dpop-key`)");
+    }
+    hints
 }
 
 /// Read the target's AAuth posture: the challenge headers it just sent, plus
@@ -356,6 +500,157 @@ fn aauth_advice(aauth: &AauthPosture) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The report carries what an ID-JAG client needs from the AS: the
+    /// issuer (the hop-1 audience) and the grant profile it advertises.
+    #[tokio::test]
+    async fn the_report_carries_the_id_jag_metadata() {
+        use axum::routing::{get, post};
+        use mcpg_mcp_client::auth::{GRANT_PROFILE_ID_JAG, GRANT_TYPE_JWT_BEARER};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let prm = serde_json::json!({
+            "resource": format!("{base}/mcp"),
+            "authorization_servers": [base],
+            "dpop_signing_alg_values_supported": ["ES256"],
+            "dpop_bound_access_tokens_required": true,
+            "authorization_details_types_supported": ["crm_record"],
+        });
+        let asm = serde_json::json!({
+            "issuer": base,
+            "token_endpoint": format!("{base}/oauth/token"),
+            "authorization_endpoint": format!("{base}/oauth/authorize"),
+            "grant_types_supported": [GRANT_TYPE_JWT_BEARER, "authorization_code"],
+            "authorization_grant_profiles_supported": [GRANT_PROFILE_ID_JAG],
+            "token_endpoint_auth_methods_supported": ["private_key_jwt", "none"],
+            "dpop_signing_alg_values_supported": ["ES256", "EdDSA"],
+            "authorization_details_types_supported": ["crm_record"],
+            "authorization_response_iss_parameter_supported": true,
+            "client_id_metadata_document_supported": true,
+        });
+        let app = axum::Router::new()
+            .route(
+                "/mcp",
+                post(|| async {
+                    (
+                        axum::http::StatusCode::UNAUTHORIZED,
+                        axum::response::AppendHeaders([
+                            ("www-authenticate", "Bearer scope=\"mcp:tools\""),
+                            ("www-authenticate", "DPoP algs=\"ES256\""),
+                        ]),
+                    )
+                }),
+            )
+            .route(
+                "/.well-known/oauth-protected-resource/mcp",
+                get(move || {
+                    let doc = prm.clone();
+                    async move { axum::Json(doc) }
+                }),
+            )
+            .route(
+                "/.well-known/oauth-authorization-server",
+                get(move || {
+                    let doc = asm.clone();
+                    async move { axum::Json(doc) }
+                }),
+            );
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let spec: TargetSpec =
+            serde_json::from_value(serde_json::json!({ "url": format!("{base}/mcp") })).unwrap();
+        let report = inspect(&spec).await.expect("report");
+        assert_eq!(report.issuer.as_deref(), Some(base.as_str()));
+        // Both challenges are kept apart: the Bearer one is parsed, the
+        // DPoP one reported as sent.
+        assert_eq!(
+            report.challenge.as_ref().and_then(|c| c.scope.as_deref()),
+            Some("mcp:tools")
+        );
+        assert_eq!(
+            report.dpop_challenge.as_deref(),
+            Some("DPoP algs=\"ES256\"")
+        );
+        assert_eq!(
+            report.grant_types_supported,
+            vec![GRANT_TYPE_JWT_BEARER, "authorization_code"]
+        );
+        assert_eq!(
+            report.authorization_grant_profiles_supported,
+            vec![GRANT_PROFILE_ID_JAG]
+        );
+        assert_eq!(report.enterprise_managed_authorization, Some("advertised"));
+        assert_eq!(
+            report.dpop_signing_alg_values_supported,
+            vec!["ES256", "EdDSA"]
+        );
+        assert_eq!(
+            report.authorization_details_types_supported,
+            vec!["crm_record"]
+        );
+        assert!(report.authorization_response_iss_parameter_supported);
+        assert!(report.client_id_metadata_document_supported);
+        let resource = report
+            .resource_token_requirements
+            .as_ref()
+            .expect("resource side");
+        assert!(resource.dpop_bound_access_tokens_required);
+        assert_eq!(resource.dpop_signing_alg_values_supported, vec!["ES256"]);
+        // The verdict names both logins and the DPoP requirement.
+        assert!(
+            report.verdict.contains("browser sign-in"),
+            "{}",
+            report.verdict
+        );
+        assert!(
+            report.verdict.contains("--idp-token-url"),
+            "{}",
+            report.verdict
+        );
+        assert!(report.verdict.contains("DPoP-bound"), "{}", report.verdict);
+
+        let doc = serde_json::to_value(&report).unwrap();
+        assert_eq!(
+            doc["authorization_grant_profiles_supported"],
+            serde_json::json!([GRANT_PROFILE_ID_JAG])
+        );
+        assert_eq!(doc["enterprise_managed_authorization"], "advertised");
+        assert_eq!(
+            doc["token_endpoint_auth_methods_supported"],
+            serde_json::json!(["private_key_jwt", "none"])
+        );
+        assert_eq!(
+            doc["resource_token_requirements"]["authorization_details_types_supported"],
+            serde_json::json!(["crm_record"])
+        );
+    }
+
+    /// Nothing about DPoP, RAR or ID-JAG is claimed of a server that says
+    /// nothing about them.
+    #[test]
+    fn a_plain_authorization_server_gets_no_extra_hints() {
+        let found = DiscoveredOauth {
+            resource: "https://h/mcp".to_owned(),
+            token_endpoint: "https://as/token".to_owned(),
+            issuer: "https://as".to_owned(),
+            ..Default::default()
+        };
+        assert_eq!(oauth_hints(&found), "");
+        assert!(ResourceTokenRequirements::of(&found).is_none());
+        let doc = serde_json::to_value(AuthReport::default()).unwrap();
+        for absent in [
+            "enterprise_managed_authorization",
+            "dpop_signing_alg_values_supported",
+            "authorization_response_iss_parameter_supported",
+            "client_id_metadata_document_supported",
+            "resource_token_requirements",
+        ] {
+            assert!(doc.get(absent).is_none(), "{absent} in {doc}");
+        }
+    }
 
     #[test]
     fn strips_the_well_known_segment_back_to_an_identifier() {

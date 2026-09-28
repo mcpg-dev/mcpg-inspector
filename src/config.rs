@@ -22,7 +22,7 @@ pub struct ServeArgs {
     pub targets: Vec<String>,
 
     /// Pin the session token instead of minting one per boot
-    #[arg(long, env = "MCPG_INSPECTOR_SESSION_TOKEN")]
+    #[arg(long, env = "MCPG_INSPECTOR_SESSION_TOKEN", hide_env_values = true)]
     pub session_token: Option<String>,
 
     /// Serve without a session token. Loopback binds only.
@@ -69,7 +69,12 @@ pub struct ServeArgs {
 
     /// OIDC client secret. Omit for a public client — PKCE is sent
     /// either way.
-    #[arg(long, env = "MCPG_INSPECTOR_OIDC_CLIENT_SECRET", value_name = "SECRET")]
+    #[arg(
+        long,
+        env = "MCPG_INSPECTOR_OIDC_CLIENT_SECRET",
+        hide_env_values = true,
+        value_name = "SECRET"
+    )]
     pub oidc_client_secret: Option<String>,
 
     /// Public origin this instance is reached at, e.g.

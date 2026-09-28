@@ -8,7 +8,11 @@ use mcpg_mcp_client::tap::SharedTap;
 use mcpg_mcp_client::upstream::UpstreamError;
 use serde_json::{Value, json};
 
+use crate::engine::client_auth::{AssertionAudience, AssertionKey, ClientAuthMethod};
 use crate::engine::eventlog::StderrWirePrinter;
+use crate::engine::idjag::SubjectTokenType;
+use crate::engine::keys::SigningAlg;
+use crate::engine::oauth::ClientAuthOptions;
 use crate::engine::responders::{MockAnswers, ResponderPolicy, Root};
 use crate::engine::session::{Session, SessionError};
 use crate::engine::snapshot::DiffMode;
@@ -20,8 +24,13 @@ pub struct TargetArgs {
     /// target object
     pub target: String,
     /// Bearer token sent to the target
-    #[arg(long, env = "MCPG_INSPECTOR_BEARER")]
+    #[arg(long, env = "MCPG_INSPECTOR_BEARER", hide_env_values = true)]
     pub bearer: Option<String>,
+    /// Present --bearer as a DPoP-bound token (RFC 9449), proving
+    /// possession with the key in this file: the private JWK `login
+    /// --dpop-key` writes, or a PKCS#8 PEM (ES256 or EdDSA)
+    #[arg(long, env = "MCPG_INSPECTOR_DPOP_KEY", value_name = "PATH")]
+    pub dpop_key: Option<std::path::PathBuf>,
     /// Extra request header, NAME=VALUE (repeatable)
     #[arg(long = "header", value_name = "NAME=VALUE")]
     pub headers: Vec<String>,
@@ -44,7 +53,12 @@ pub struct TargetArgs {
     // ── AAuth ──────────────────────────────────────────────────────
     /// Sign requests with AAuth using this Ed25519 seed (unpadded
     /// base64url, 32 bytes). `mcpg inspector aauth-keygen` prints one.
-    #[arg(long, env = "MCPG_INSPECTOR_AAUTH_KEY", value_name = "SEED")]
+    #[arg(
+        long,
+        env = "MCPG_INSPECTOR_AAUTH_KEY",
+        hide_env_values = true,
+        value_name = "SEED"
+    )]
     pub aauth_key: Option<String>,
     /// Agent identifier to self-issue an agent token for,
     /// `aauth:local@domain`
@@ -57,6 +71,7 @@ pub struct TargetArgs {
     #[arg(
         long,
         env = "MCPG_INSPECTOR_AAUTH_TOKEN",
+        hide_env_values = true,
         value_name = "JWT",
         requires = "aauth_key"
     )]
@@ -87,6 +102,7 @@ pub struct TargetArgs {
     #[arg(
         long,
         env = "MCPG_INSPECTOR_AAUTH_PRESENT",
+        hide_env_values = true,
         value_name = "JWT",
         requires = "aauth_key"
     )]
@@ -724,6 +740,16 @@ fn build_spec(args: &TargetArgs) -> Result<TargetSpec, String> {
     }
     spec.timeout_ms = args.timeout_ms;
     spec.responder = responder_policy(args)?;
+    if let Some(path) = &args.dpop_key {
+        if !path.exists() {
+            return Err(format!(
+                "no DPoP key at {}; `login --dpop-key {}` creates one",
+                path.display(),
+                path.display()
+            ));
+        }
+        spec.dpop = Some(Arc::new(crate::engine::dpop::DpopKey::from_file(path)?));
+    }
     if let Some(key) = &args.aauth_key {
         spec.aauth = Some(crate::engine::aauth::AauthSpec {
             key: key.clone(),
@@ -808,6 +834,7 @@ fn error_class(e: &UpstreamError) -> &'static str {
         UpstreamError::Rebinding(_) => "rebinding",
         UpstreamError::ResponseTooLarge { .. } => "response_too_large",
         UpstreamError::JsonRpc { .. } => "jsonrpc",
+        UpstreamError::NotLinked { .. } => "not_linked",
     }
 }
 
@@ -963,26 +990,157 @@ pub fn run_aauth_keygen(args: AauthKeygenArgs) -> ! {
 pub struct LoginArgs {
     #[command(flatten)]
     pub target: TargetArgs,
-    /// Pre-registered OAuth client. Omit to register dynamically
-    /// (RFC 7591), which most MCP authorization servers support because
-    /// clients cannot pre-register everywhere.
+    /// Pre-registered OAuth client, or the https URL of the client's
+    /// metadata document. Omit to register dynamically (RFC 7591) for a
+    /// browser sign-in; an ID-JAG login needs it, because the ID-JAG names
+    /// the client.
     #[arg(long, value_name = "ID")]
     pub client_id: Option<String>,
+    /// Secret of --client-id at the authorization server
+    #[arg(
+        long,
+        env = "MCPG_INSPECTOR_CLIENT_SECRET",
+        hide_env_values = true,
+        value_name = "SECRET"
+    )]
+    pub client_secret: Option<String>,
+    /// How --client-id authenticates at the token endpoint. Defaults to
+    /// private_key_jwt with --client-key, a secret method with
+    /// --client-secret, else none (a public client).
+    #[arg(long, value_enum, value_name = "METHOD")]
+    pub client_auth: Option<ClientAuthMethod>,
+    /// Private key (PEM, or a P-256 / Ed25519 private JWK) that signs
+    /// --client-id's private_key_jwt assertions
+    #[arg(long, value_name = "PATH")]
+    pub client_key: Option<std::path::PathBuf>,
+    /// `kid` of --client-key, as the authorization server knows it
+    #[arg(long, value_name = "KID", requires = "client_key")]
+    pub client_key_id: Option<String>,
+    /// Algorithm of --client-key; defaults to what the key is
+    #[arg(long, value_enum, value_name = "ALG", requires = "client_key")]
+    pub client_signing_alg: Option<SigningAlg>,
+    /// `aud` of --client-id's assertions
+    #[arg(long, value_enum, value_name = "AUD", default_value_t = AssertionAudience::Issuer)]
+    pub client_assertion_audience: AssertionAudience,
+    /// Initial access token for dynamic registration (RFC 7591 §3), for a
+    /// server that does not take anonymous registrations
+    #[arg(
+        long,
+        env = "MCPG_INSPECTOR_REGISTRATION_TOKEN",
+        hide_env_values = true,
+        value_name = "TOKEN"
+    )]
+    pub registration_token: Option<String>,
     /// Scope to request (repeatable). Defaults to what the challenge asked
-    /// for, else what the authorization server advertises.
+    /// for, else (browser sign-in only) what the authorization server
+    /// advertises.
     #[arg(long = "scope", value_name = "SCOPE")]
     pub scopes: Vec<String>,
+    /// RFC 9396 authorization details to ask for: a JSON array, or @file
+    #[arg(long, value_name = "JSON|@FILE")]
+    pub authorization_details: Option<String>,
     /// Print the authorization URL instead of opening a browser
     #[arg(long)]
     pub no_browser: bool,
+    /// Write the access token to this file (owner-only) instead of stdout
+    #[arg(long, value_name = "PATH")]
+    pub token_file: Option<std::path::PathBuf>,
+
+    // ── enterprise-managed authorization (ID-JAG) ──────────────────
+    // Any of these selects the ID-JAG login in place of the browser.
+    /// The IdP's token endpoint, where the subject token is exchanged for
+    /// an ID-JAG (RFC 8693)
+    #[arg(long, value_name = "URL")]
+    pub idp_token_url: Option<String>,
+    /// The subject token: the user's ID token (or SAML assertion, or IdP
+    /// refresh token)
+    #[arg(
+        long,
+        env = "MCPG_INSPECTOR_SUBJECT_TOKEN",
+        hide_env_values = true,
+        value_name = "TOKEN",
+        conflicts_with = "subject_token_file"
+    )]
+    pub subject_token: Option<String>,
+    /// Read the subject token from this file, or `-` for stdin
+    #[arg(long, value_name = "PATH")]
+    pub subject_token_file: Option<String>,
+    /// What the subject token is
+    #[arg(long, value_enum, value_name = "TYPE", default_value_t = SubjectTokenType::IdToken)]
+    pub subject_token_type: SubjectTokenType,
+    /// The inspector's client id at the IdP
+    #[arg(long, value_name = "ID")]
+    pub idp_client_id: Option<String>,
+    /// Secret of --idp-client-id
+    #[arg(
+        long,
+        env = "MCPG_INSPECTOR_IDP_CLIENT_SECRET",
+        hide_env_values = true,
+        value_name = "SECRET"
+    )]
+    pub idp_client_secret: Option<String>,
+    /// How --idp-client-id authenticates at the IdP (default as for
+    /// --client-auth)
+    #[arg(long, value_enum, value_name = "METHOD")]
+    pub idp_client_auth: Option<ClientAuthMethod>,
+    /// Private key that signs --idp-client-id's private_key_jwt assertions
+    #[arg(long, value_name = "PATH")]
+    pub idp_client_key: Option<std::path::PathBuf>,
+    /// `kid` of --idp-client-key, as the IdP knows it
+    #[arg(long, value_name = "KID", requires = "idp_client_key")]
+    pub idp_client_key_id: Option<String>,
+    /// Algorithm of --idp-client-key; defaults to what the key is
+    #[arg(long, value_enum, value_name = "ALG", requires = "idp_client_key")]
+    pub idp_client_signing_alg: Option<SigningAlg>,
+    /// `aud` of --idp-client-id's assertions: the token endpoint URL, which
+    /// Okta expects, or the IdP issuer (--idp-issuer)
+    #[arg(
+        long,
+        value_enum,
+        value_name = "AUD",
+        default_value_t = AssertionAudience::TokenEndpoint
+    )]
+    pub idp_assertion_audience: AssertionAudience,
+    /// The IdP's issuer identifier, for --idp-assertion-audience issuer
+    #[arg(long, value_name = "URL")]
+    pub idp_issuer: Option<String>,
+    /// An ID-JAG obtained elsewhere, redeemed as it is (skips the IdP)
+    #[arg(
+        long,
+        env = "MCPG_INSPECTOR_ID_JAG",
+        hide_env_values = true,
+        value_name = "JWT",
+        conflicts_with_all = ["id_jag_file", "idp_token_url"]
+    )]
+    pub id_jag: Option<String>,
+    /// Read a ready ID-JAG from this file, or `-` for stdin
+    #[arg(long, value_name = "PATH", conflicts_with = "idp_token_url")]
+    pub id_jag_file: Option<String>,
+}
+
+impl LoginArgs {
+    /// Whether this is an ID-JAG login rather than a browser sign-in.
+    fn id_jag_mode(&self) -> bool {
+        self.idp_token_url.is_some()
+            || self.subject_token.is_some()
+            || self.subject_token_file.is_some()
+            || self.id_jag.is_some()
+            || self.id_jag_file.is_some()
+    }
 }
 
 /// Walk the discovery chain, then actually sign in.
 ///
-/// `auth` tells an operator what a server wants; this gets it. The token it
-/// prints is the one to pass back as `--bearer`.
-pub fn run_login(args: LoginArgs) -> ! {
+/// `auth` tells an operator what a server wants; this gets it, with a
+/// browser (authorization code + PKCE) or, given an IdP token endpoint and
+/// a subject token or a ready ID-JAG, without one (enterprise-managed
+/// authorization). The token goes to stdout, or to `--token-file`, and is
+/// the one to pass back as `--bearer`. Nothing else it handles — a subject
+/// token, an ID-JAG, a secret, a key — is printed.
+pub fn run_login(mut args: LoginArgs) -> ! {
     let json_out = args.target.json;
+    // The login creates this key; `build_spec` only reads an existing one.
+    let dpop_path = args.target.dpop_key.take();
     let spec = match build_spec(&args.target) {
         Ok(s) => s,
         Err(message) => fail(EXIT_USAGE, "usage", &message, json_out),
@@ -1007,50 +1165,324 @@ pub fn run_login(args: LoginArgs) -> ! {
             Ok(d) => d,
             Err(message) => return fail_code(EXIT_AUTH, "auth_required", &message, json_out),
         };
-
-        let opts = crate::engine::oauth::LoginOptions {
-            client_id: args.client_id.clone(),
-            public_url: None,
-            scopes: args.scopes.clone(),
-            no_browser: args.no_browser,
-            visit: None,
+        let dpop = match &dpop_path {
+            Some(path) => match open_dpop_key(path, &discovered) {
+                Ok(key) => Some(key),
+                Err(message) => return fail_code(EXIT_USAGE, "usage", &message, json_out),
+            },
+            None => None,
         };
         let challenge_scope = report.challenge.as_ref().and_then(|c| c.scope.clone());
-        match crate::engine::oauth::login(&discovered, challenge_scope.as_deref(), &opts).await {
-            Ok(outcome) => {
-                if json_out {
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(&outcome).unwrap_or_default()
-                    );
-                } else {
-                    eprintln!("signed in as client {}", outcome.client_id);
-                    eprintln!(
-                        "  client:   {}",
-                        match outcome.registration {
-                            crate::engine::oauth::Registration::PreRegistered => "pre-registered",
-                            crate::engine::oauth::Registration::ClientIdMetadata =>
-                                "client-ID metadata document",
-                            crate::engine::oauth::Registration::Dynamic =>
-                                "registered dynamically for this login",
-                        }
-                    );
-                    if let Some(scope) = &outcome.scope {
-                        eprintln!("  scope:    {scope}");
-                    }
-                    if let Some(expires) = outcome.expires_in {
-                        eprintln!("  expires:  {expires}s");
-                    }
-                    eprintln!("  audience: {}", outcome.resource);
-                    eprintln!("\npass this back with --bearer:\n");
-                    println!("{}", outcome.access_token);
-                }
-                0
-            }
+        let outcome = if args.id_jag_mode() {
+            let opts = match id_jag_options(&args, &discovered, dpop) {
+                Ok(opts) => opts,
+                Err(message) => return fail_code(EXIT_USAGE, "usage", &message, json_out),
+            };
+            crate::engine::idjag::login(&discovered, challenge_scope.as_deref(), &opts).await
+        } else {
+            let opts = match browser_options(&args, dpop) {
+                Ok(opts) => opts,
+                Err(message) => return fail_code(EXIT_USAGE, "usage", &message, json_out),
+            };
+            crate::engine::oauth::login(&discovered, challenge_scope.as_deref(), &opts).await
+        };
+        match outcome {
+            Ok(outcome) => report_login(&outcome, &args, dpop_path.as_deref(), json_out),
             Err(message) => fail_code(EXIT_AUTH, "auth_required", &message, json_out),
         }
     });
     std::process::exit(code);
+}
+
+/// The DPoP key at `path`, created for an algorithm the authorization
+/// server accepts when there is no file yet.
+fn open_dpop_key(
+    path: &std::path::Path,
+    discovered: &mcpg_mcp_client::auth::DiscoveredOauth,
+) -> Result<Arc<crate::engine::dpop::DpopKey>, String> {
+    let (key, created) = crate::engine::dpop::DpopKey::load_or_create(
+        path,
+        &discovered.dpop_signing_alg_values_supported,
+    )?;
+    if created {
+        eprintln!(
+            "created a DPoP key ({}) in {} (owner-only; keep it with the token)",
+            key.alg_name(),
+            path.display()
+        );
+    }
+    Ok(Arc::new(key))
+}
+
+/// A private key for `private_key_jwt`, read from `path`.
+fn assertion_key(
+    path: &std::path::Path,
+    alg: Option<SigningAlg>,
+    key_id: Option<&String>,
+    audience: AssertionAudience,
+) -> Result<AssertionKey, String> {
+    Ok(AssertionKey {
+        key: Arc::new(crate::engine::keys::SigningKey::from_file(path, alg)?),
+        key_id: key_id.cloned(),
+        audience,
+    })
+}
+
+/// How the client named by `--client-id` authenticates.
+fn client_auth_options(args: &LoginArgs) -> Result<ClientAuthOptions, String> {
+    let key = args
+        .client_key
+        .as_deref()
+        .map(|path| {
+            assertion_key(
+                path,
+                args.client_signing_alg,
+                args.client_key_id.as_ref(),
+                args.client_assertion_audience,
+            )
+        })
+        .transpose()?;
+    Ok(ClientAuthOptions {
+        method: args.client_auth,
+        secret: args.client_secret.clone(),
+        key,
+    })
+}
+
+fn authorization_details(args: &LoginArgs) -> Result<Option<String>, String> {
+    let Some(input) = args.authorization_details.as_deref() else {
+        return Ok(None);
+    };
+    let value = parse_args_input(input).map_err(|e| format!("--authorization-details: {e}"))?;
+    if !value.is_array() {
+        return Err("--authorization-details must be a JSON array (RFC 9396 §2)".to_owned());
+    }
+    Ok(Some(value.to_string()))
+}
+
+fn browser_options(
+    args: &LoginArgs,
+    dpop: Option<Arc<crate::engine::dpop::DpopKey>>,
+) -> Result<crate::engine::oauth::LoginOptions, String> {
+    Ok(crate::engine::oauth::LoginOptions {
+        client_id: args.client_id.clone(),
+        client_auth: client_auth_options(args)?,
+        registration_token: args.registration_token.clone(),
+        public_url: None,
+        scopes: args.scopes.clone(),
+        no_browser: args.no_browser,
+        visit: None,
+        dpop,
+        authorization_details: authorization_details(args)?,
+    })
+}
+
+fn id_jag_options(
+    args: &LoginArgs,
+    discovered: &mcpg_mcp_client::auth::DiscoveredOauth,
+    dpop: Option<Arc<crate::engine::dpop::DpopKey>>,
+) -> Result<crate::engine::idjag::IdJagOptions, String> {
+    use crate::engine::idjag::{IdJagOptions, IdJagSource, IdpExchange};
+
+    if args.registration_token.is_some() || args.no_browser {
+        return Err(
+            "--registration-token and --no-browser belong to the browser sign-in; an ID-JAG \
+             login registers nothing and opens no browser"
+                .to_owned(),
+        );
+    }
+    let client_id = args.client_id.clone().ok_or(
+        "an ID-JAG login needs --client-id: the client as registered at the MCP server's \
+         authorization server, which the ID-JAG names",
+    )?;
+    let client = client_auth_options(args)?.credentials("--client", client_id, discovered)?;
+    if args.subject_token_file.as_deref() == Some("-") && args.id_jag_file.as_deref() == Some("-") {
+        return Err("only one of --subject-token-file and --id-jag-file can read stdin".to_owned());
+    }
+    let supplied = match (&args.id_jag, &args.id_jag_file) {
+        (Some(id_jag), _) => Some(id_jag.clone()),
+        (None, Some(path)) => Some(read_secret_input(path, "--id-jag-file")?),
+        (None, None) => None,
+    };
+    let source = match supplied {
+        Some(id_jag) => {
+            if args.subject_token.is_some() || args.subject_token_file.is_some() {
+                return Err(
+                    "a ready ID-JAG needs no subject token; pass one or the other".to_owned(),
+                );
+            }
+            IdJagSource::Supplied(id_jag)
+        }
+        None => {
+            let token_endpoint = args.idp_token_url.clone().ok_or(
+                "a subject token is exchanged at the IdP: pass --idp-token-url, or pass a ready \
+                 ID-JAG with --id-jag-file",
+            )?;
+            let subject_token = match (&args.subject_token, &args.subject_token_file) {
+                (Some(token), _) => token.clone(),
+                (None, Some(path)) => read_secret_input(path, "--subject-token-file")?,
+                (None, None) => {
+                    return Err("--idp-token-url needs the user's subject token: \
+                         --subject-token-file PATH (or - for stdin)"
+                        .to_owned());
+                }
+            };
+            let idp_client_id = args.idp_client_id.clone().ok_or(
+                "--idp-token-url needs --idp-client-id: the inspector's client at the IdP",
+            )?;
+            let key = args
+                .idp_client_key
+                .as_deref()
+                .map(|path| {
+                    assertion_key(
+                        path,
+                        args.idp_client_signing_alg,
+                        args.idp_client_key_id.as_ref(),
+                        args.idp_assertion_audience,
+                    )
+                })
+                .transpose()?;
+            if key
+                .as_ref()
+                .is_some_and(|k| k.audience == AssertionAudience::Issuer)
+                && args.idp_issuer.is_none()
+            {
+                return Err("--idp-assertion-audience issuer needs --idp-issuer".to_owned());
+            }
+            let idp_client = crate::engine::client_auth::ClientCredentials::build(
+                "--idp-client",
+                idp_client_id,
+                args.idp_client_auth,
+                args.idp_client_secret.clone(),
+                key,
+                &[],
+            )?;
+            IdJagSource::Exchange(Box::new(IdpExchange {
+                token_endpoint,
+                issuer: args.idp_issuer.clone(),
+                client: idp_client,
+                subject_token,
+                subject_token_type: args.subject_token_type,
+            }))
+        }
+    };
+    Ok(IdJagOptions {
+        source,
+        client,
+        scopes: args.scopes.clone(),
+        dpop,
+        authorization_details: authorization_details(args)?,
+    })
+}
+
+/// A token or grant from a file, or from stdin for `-`.
+fn read_secret_input(path: &str, flag: &str) -> Result<String, String> {
+    let text = if path == "-" {
+        use std::io::Read as _;
+        let mut text = String::new();
+        std::io::stdin()
+            .read_to_string(&mut text)
+            .map_err(|e| format!("{flag}: cannot read stdin: {e}"))?;
+        text
+    } else {
+        std::fs::read_to_string(path).map_err(|e| format!("{flag}: cannot read {path}: {e}"))?
+    };
+    let text = text.trim().to_owned();
+    if text.is_empty() {
+        return Err(format!("{flag}: {path} is empty"));
+    }
+    Ok(text)
+}
+
+/// Print what the login produced: the token on stdout (or into
+/// `--token-file`), and everything else about it on stderr.
+fn report_login(
+    outcome: &crate::engine::oauth::LoginOutcome,
+    args: &LoginArgs,
+    dpop_path: Option<&std::path::Path>,
+    json_out: bool,
+) -> i32 {
+    use crate::engine::oauth::{Grant, Registration};
+
+    if let Some(path) = &args.token_file
+        && let Err(message) = crate::engine::keys::write_private_file(
+            path,
+            format!("{}\n", outcome.access_token).as_bytes(),
+            true,
+        )
+    {
+        return fail_code(EXIT_USAGE, "usage", &message, json_out);
+    }
+    if json_out {
+        let mut doc = serde_json::to_value(outcome).unwrap_or_else(|_| json!({}));
+        if let (Some(path), Some(object)) = (&args.token_file, doc.as_object_mut()) {
+            object.remove("access_token");
+            object.remove("refresh_token");
+            object.insert("token_file".to_owned(), json!(path.display().to_string()));
+        }
+        println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+        return 0;
+    }
+    eprintln!("signed in as client {}", outcome.client_id);
+    eprintln!(
+        "  grant:    {}",
+        match outcome.grant {
+            Grant::AuthorizationCode => "authorization code with PKCE (browser sign-in)",
+            Grant::IdJag => "ID-JAG redeemed with the JWT bearer grant (enterprise-managed)",
+        }
+    );
+    eprintln!(
+        "  client:   {} ({})",
+        match outcome.registration {
+            Registration::PreRegistered => "pre-registered",
+            Registration::ClientIdMetadata => "client-ID metadata document",
+            Registration::Dynamic => "registered dynamically for this login",
+        },
+        outcome.client_auth.as_str()
+    );
+    if let Some(id_jag) = &outcome.id_jag {
+        eprintln!(
+            "  id-jag:   {} by {}",
+            if id_jag.source == "exchange" {
+                "exchanged at the IdP"
+            } else {
+                "supplied"
+            },
+            id_jag.iss.as_deref().unwrap_or("an unnamed issuer")
+        );
+    }
+    if let Some(scope) = &outcome.scope {
+        eprintln!("  scope:    {scope}");
+    }
+    if let Some(details) = &outcome.authorization_details {
+        eprintln!("  details:  {details}");
+    }
+    if let Some(expires) = outcome.expires_in {
+        eprintln!("  expires:  {expires}s");
+    }
+    eprintln!("  audience: {}", outcome.resource);
+    let dpop_flag = match (&outcome.dpop_jkt, dpop_path) {
+        (Some(jkt), Some(path)) => {
+            eprintln!("  bound:    DPoP key {jkt} in {}", path.display());
+            format!(" --dpop-key {}", path.display())
+        }
+        _ => String::new(),
+    };
+    for warning in &outcome.warnings {
+        eprintln!("  warning:  {warning}");
+    }
+    match &args.token_file {
+        Some(path) => eprintln!(
+            "\nthe token is in {}; pass it back with --bearer \"$(cat {})\"{dpop_flag}",
+            path.display(),
+            path.display()
+        ),
+        None => {
+            eprintln!("\npass this back with --bearer{dpop_flag}:\n");
+            println!("{}", outcome.access_token);
+        }
+    }
+    0
 }
 
 /// Re-run discovery for its full result.

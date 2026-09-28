@@ -59,6 +59,11 @@ pub struct TargetSpec {
     /// the static headers above.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aauth: Option<crate::engine::aauth::AauthSpec>,
+    /// Present `bearer` as a DPoP-bound token proven with this key
+    /// (RFC 9449). Set from the command line only: a target object never
+    /// names a key file, so no API caller can make this process read one.
+    #[serde(skip)]
+    pub dpop: Option<std::sync::Arc<crate::engine::dpop::DpopKey>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -144,7 +149,31 @@ impl TargetSpec {
             timeout_ms: default_timeout_ms(),
             max_response_bytes: default_max_response_bytes(),
             aauth: None,
+            dpop: None,
         }
+    }
+
+    /// The signer that presents `bearer` with DPoP proofs, when a key is
+    /// set.
+    pub fn dpop_signer(&self) -> Result<Option<crate::engine::dpop::DpopSigner>, String> {
+        let Some(key) = &self.dpop else {
+            return Ok(None);
+        };
+        if self.aauth.is_some() {
+            return Err(
+                "a request is signed with AAuth or carries a DPoP proof, not both; \
+                 drop --dpop-key or the --aauth-* flags"
+                    .to_owned(),
+            );
+        }
+        let token = self
+            .bearer
+            .clone()
+            .ok_or("--dpop-key proves possession of a token; pass the token with --bearer")?;
+        Ok(Some(crate::engine::dpop::DpopSigner::new(
+            key.clone(),
+            token,
+        )))
     }
 
     /// Lower the spec into client connect options. stdio speaks only the
@@ -190,9 +219,18 @@ impl TargetSpec {
             (_, VersionPolicy::Stateless) => (true, false),
         };
         let capture_stdio_stderr = tap.is_some();
+        let dpop: Option<mcpg_mcp_client::signer::SharedSigner> = self
+            .dpop_signer()?
+            .map(|signer| std::sync::Arc::new(signer) as _);
         Ok(UpstreamConnectOptions {
             url,
-            bearer_token: self.bearer.clone(),
+            // A DPoP-bound token goes out under the DPoP scheme, which the
+            // signer writes; the Bearer header would be refused.
+            bearer_token: if dpop.is_some() {
+                None
+            } else {
+                self.bearer.clone()
+            },
             tunnel_token: None,
             allow_private: self.allow_private,
             max_response_bytes: self.max_response_bytes,
@@ -208,11 +246,11 @@ impl TargetSpec {
             env,
             tap,
             capture_stdio_stderr,
-            signer: match &self.aauth {
-                Some(spec) => Some(std::sync::Arc::new(crate::engine::aauth::AauthSigner::new(
-                    spec,
-                )?)),
-                None => None,
+            signer: match (&self.aauth, dpop) {
+                (Some(spec), _) => Some(std::sync::Arc::new(
+                    crate::engine::aauth::AauthSigner::new(spec)?,
+                )),
+                (None, dpop) => dpop,
             },
         })
     }
@@ -250,6 +288,47 @@ mod tests {
         let mut t = TargetSpec::parse_cli("stdio:server").unwrap();
         t.protocol_version = VersionPolicy::Stateless;
         assert!(t.connect_options(None).is_err());
+    }
+
+    /// A DPoP key moves the token from the Bearer header into the signer,
+    /// which presents it under the DPoP scheme with a proof.
+    #[test]
+    fn a_dpop_key_presents_the_token_through_the_signer() {
+        let mut t = TargetSpec::parse_cli("https://example.com/mcp").unwrap();
+        t.bearer = Some("tok".to_owned());
+        t.dpop = Some(std::sync::Arc::new(
+            crate::engine::dpop::DpopKey::generate(crate::engine::keys::SigningAlg::Es256).unwrap(),
+        ));
+        let o = t.connect_options(None).unwrap();
+        assert!(o.bearer_token.is_none());
+        let signed = o
+            .signer
+            .expect("a signer")
+            .sign(&mcpg_mcp_client::signer::SigningRequest {
+                method: "POST",
+                url: "https://example.com/mcp",
+                headers: &[],
+                body: Some(b"{}"),
+            })
+            .unwrap();
+        assert!(
+            signed
+                .iter()
+                .any(|(n, v)| n == "authorization" && v == "DPoP tok")
+        );
+        assert!(signed.iter().any(|(n, _)| n == "dpop"));
+        // Serialized, the key is not there: a target object never names one.
+        assert!(serde_json::to_value(&t).unwrap().get("dpop").is_none());
+    }
+
+    #[test]
+    fn a_dpop_key_needs_a_token() {
+        let mut t = TargetSpec::parse_cli("https://example.com/mcp").unwrap();
+        t.dpop = Some(std::sync::Arc::new(
+            crate::engine::dpop::DpopKey::generate(crate::engine::keys::SigningAlg::EdDsa).unwrap(),
+        ));
+        let err = t.connect_options(None).err().expect("refused");
+        assert!(err.contains("--bearer"), "{err}");
     }
 
     #[test]

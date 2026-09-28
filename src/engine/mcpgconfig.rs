@@ -245,14 +245,7 @@ mod tests {
         AuthReport {
             probe_status: 200,
             answered_without_credential: true,
-            www_authenticate: None,
-            challenge: None,
-            discovery: Vec::new(),
-            resource: None,
-            token_endpoint: None,
-            discovery_error: None,
-            aauth: None,
-            verdict: String::new(),
+            ..Default::default()
         }
     }
 

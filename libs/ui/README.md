@@ -3,8 +3,8 @@
 Shared React component primitives and the design-token stylesheet behind every
 MCPG web surface. Ships shadcn/ui-style components built on Radix, a `cn`
 class-merging helper, and a single Tailwind v4 CSS-first stylesheet that owns the
-palette, the dark variant, and the shared utilities. Requires **Node 20+** and
-**pnpm 10+**.
+palette, the dark variant, and the shared utilities. Requires **Node 22.22.1+**
+and **pnpm 12+**.
 
 The package is `private: true` — it is consumed inside this workspace over
 `workspace:*` and is not published to npm.

@@ -29,8 +29,9 @@ enum Command {
     Auth(verbs::AuthArgs),
     /// Emit the mcpg federation config for a target
     Config(verbs::ConfigArgs),
-    /// Sign in to a target and print the token (OAuth + PKCE)
-    Login(verbs::LoginArgs),
+    /// Sign in to a target and print the token: a browser sign-in (OAuth +
+    /// PKCE) or, from an IdP token, enterprise-managed authorization (ID-JAG)
+    Login(Box<verbs::LoginArgs>),
     /// Run the portable protocol checks against a target
     Check(verbs::CheckArgs),
     /// What the mcpg gateway behind this endpoint says about itself
@@ -77,7 +78,7 @@ fn main() {
         Command::Complete(args) => verbs::run_complete(args),
         Command::Auth(args) => verbs::run_auth(args),
         Command::Config(args) => verbs::run_config(args),
-        Command::Login(args) => verbs::run_login(args),
+        Command::Login(args) => verbs::run_login(*args),
         Command::Check(args) => verbs::run_check(args),
         Command::Gateway(args) => verbs::run_gateway(args),
         Command::Bench(args) => verbs::run_bench(args),

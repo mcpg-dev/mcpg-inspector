@@ -91,7 +91,43 @@ impl Session {
             signer.acquire(url).await.map_err(SessionError::Spec)?;
             opts.signer = Some(signer);
         }
-        let upstream = connect_upstream(opts).await.map_err(SessionError::Client)?;
+        // DPoP: the signer is kept by type, so a resource that demands a
+        // server nonce (RFC 9449 §9) can be asked for one and the connect
+        // tried once more with it.
+        let dpop = match spec.dpop_signer().map_err(SessionError::Spec)? {
+            Some(signer) => {
+                let signer = Arc::new(signer);
+                opts.signer = Some(signer.clone());
+                Some(signer)
+            }
+            None => None,
+        };
+        // A pinned stateless wire sends nothing at connect, so a nonce the
+        // resource demands is asked for up front rather than on a refusal.
+        if let (Some(signer), Some(url)) = (&dpop, &endpoint_url)
+            && opts.modern
+            && !opts.probe
+        {
+            signer
+                .learn_nonce(&nonce_client(spec, url).await?, url)
+                .await;
+        }
+        let upstream = match (connect_upstream(opts.clone()).await, dpop, &endpoint_url) {
+            (Ok(upstream), _, _) => upstream,
+            (Err(UpstreamError::Http { status: 401, .. }), Some(signer), Some(url)) => {
+                if !signer
+                    .learn_nonce(&nonce_client(spec, url).await?, url)
+                    .await
+                {
+                    return Err(SessionError::Client(UpstreamError::Http {
+                        status: 401,
+                        jsonrpc_code: None,
+                    }));
+                }
+                connect_upstream(opts).await.map_err(SessionError::Client)?
+            }
+            (Err(e), _, _) => return Err(SessionError::Client(e)),
+        };
         Ok(Self {
             upstream,
             responder,
@@ -312,6 +348,21 @@ fn channel_of(channel: &str) -> mcpg_mcp_client::tap::FrameChannel {
         "stdio-stderr" => mcpg_mcp_client::tap::FrameChannel::StdioStderr,
         _ => mcpg_mcp_client::tap::FrameChannel::Stdio,
     }
+}
+
+/// A client for asking `url` for a DPoP nonce, under the same egress policy
+/// as the session itself.
+async fn nonce_client(spec: &TargetSpec, url: &str) -> Result<reqwest::Client, SessionError> {
+    mcpg_mcp_client::auth::guarded_client(
+        url,
+        mcpg_mcp_client::auth::DiscoveryPolicy {
+            allow_private: spec.allow_private,
+            allow_insecure_http: url.starts_with("http://"),
+        },
+        std::time::Duration::from_millis(spec.timeout_ms),
+    )
+    .await
+    .map_err(SessionError::Spec)
 }
 
 #[derive(Debug)]
