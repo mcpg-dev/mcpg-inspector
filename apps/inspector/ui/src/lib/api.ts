@@ -124,6 +124,58 @@ export interface Prompt {
   arguments?: PromptArgument[];
 }
 
+/** One MCP Events type, as `events/list` describes it. */
+export interface EventType {
+  name: string;
+  description?: string;
+  /** `poll`, `push`, `webhook`: the ways it can be delivered. */
+  delivery?: string[];
+  inputSchema?: unknown;
+  payloadSchema?: unknown;
+  _meta?: unknown;
+}
+
+/** One POST a webhook callback of this inspector took. */
+export interface EventDelivery {
+  /** Position among everything the callback took, from 1. */
+  seq: number;
+  webhookId: string;
+  kind: 'event' | 'gap' | 'terminated' | 'verification';
+  eventId?: string;
+  hasCursor: boolean;
+  receivedAtMs: number;
+  body: unknown;
+}
+
+/** A webhook subscription's callback, with what it took and its checks. */
+export interface EventHook {
+  sid: string;
+  name: string;
+  arguments: Record<string, unknown>;
+  url: string;
+  /** Deliveries refused for their signature or timestamp. */
+  refused: number;
+  deliveries: EventDelivery[];
+  checks: CheckResult[];
+}
+
+export interface EventStreamReport {
+  name: string;
+  frames: number;
+  events: number;
+  heartbeats: number;
+  longestGapMs: number;
+  firstFrame?: string;
+  missingCursor: number;
+  malformed: number;
+  endedWith?: string;
+}
+
+export interface EventChecks {
+  hooks: EventHook[];
+  streams: { stream: EventStreamReport; checks: CheckResult[] }[];
+}
+
 export interface DiscoveryStep {
   step: string;
   url: string;
@@ -273,6 +325,20 @@ export const api = {
       `/api/v1/targets/${encodeURIComponent(id)}/subscribe?${params}`,
     );
   },
+  /**
+   * An `events/stream` of one event type, one JSON-RPC message per SSE
+   * event. Held open like a subscription, for the same reason.
+   */
+  eventStream: (id: string, name: string, args: unknown): EventSource => {
+    const params = new URLSearchParams({ name, arguments: JSON.stringify(args ?? {}) });
+    if (token) params.set('token', token);
+    return new EventSource(
+      `/api/v1/targets/${encodeURIComponent(id)}/event-streams?${params}`,
+    );
+  },
+  /** What this target's webhook callbacks took and its event streams sent. */
+  eventChecks: (id: string) =>
+    request<EventChecks>(`/targets/${encodeURIComponent(id)}/event-checks`),
   /**
    * Live wire frames. EventSource cannot set headers, so the token
    * rides the query — the server's origin gate already refused any

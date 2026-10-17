@@ -12,6 +12,7 @@
 
 use std::collections::BTreeMap;
 
+use mcpg_mcp_wire::v_2026_07_28::extensions::events::schema::{SchemaRole, is_additive_change};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -53,6 +54,24 @@ pub struct Snapshot {
     pub resource_templates: BTreeMap<String, Entry>,
     #[serde(default)]
     pub prompts: BTreeMap<String, Entry>,
+    #[serde(default)]
+    pub events: BTreeMap<String, EventEntry>,
+}
+
+/// One event type. Its schemas are kept whole, not hashed: whether a
+/// change breaks a subscriber depends on what changed in them.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventEntry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Delivery modes, sorted.
+    #[serde(default)]
+    pub delivery: Vec<String>,
+    #[serde(default)]
+    pub input_schema: Value,
+    #[serde(default)]
+    pub payload_schema: Value,
 }
 
 /// Stable hash of a JSON value: serialized through `BTreeMap`-backed
@@ -166,13 +185,33 @@ pub async fn capture(session: &Session) -> Snapshot {
             );
         }
     }
+    if let Ok(events) = session.list_events().await {
+        for event in events {
+            let mut delivery: Vec<String> = event
+                .delivery
+                .iter()
+                .map(|mode| mode.as_str().to_owned())
+                .collect();
+            delivery.sort();
+            delivery.dedup();
+            snapshot.events.insert(
+                event.name,
+                EventEntry {
+                    description: event.description,
+                    delivery,
+                    input_schema: event.input_schema,
+                    payload_schema: event.payload_schema,
+                },
+            );
+        }
+    }
     snapshot
 }
 
 /// One difference between two snapshots.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Change {
-    /// `tools`, `resources`, `resourceTemplates`, `prompts`.
+    /// `tools`, `resources`, `resourceTemplates`, `prompts`, `events`.
     pub surface: &'static str,
     pub name: String,
     pub kind: ChangeKind,
@@ -187,13 +226,17 @@ pub enum ChangeKind {
     Added,
     Removed,
     Changed,
+    /// Changed in a way every existing client absorbs: an event type
+    /// whose schemas only describe more, or that offers more delivery
+    /// modes.
+    Extended,
 }
 
 /// How strictly a diff is judged.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
 pub enum DiffMode {
-    /// Additions are fine; removals and changed shapes are not. This
-    /// is what "did we break a client" means.
+    /// Additions and extensions are fine; removals and changed shapes
+    /// are not. This is what "did we break a client" means.
     #[default]
     Compatible,
     /// Any difference at all fails — for pinning an exact surface.
@@ -228,10 +271,13 @@ pub fn diff(before: &Snapshot, after: &Snapshot, mode: DiffMode) -> Diff {
         &mut changes,
     );
     compare("prompts", &before.prompts, &after.prompts, &mut changes);
+    compare_events(&before.events, &after.events, &mut changes);
 
     let ok = match mode {
         DiffMode::Strict => changes.is_empty(),
-        DiffMode::Compatible => !changes.iter().any(|c| c.kind != ChangeKind::Added),
+        DiffMode::Compatible => changes
+            .iter()
+            .all(|c| matches!(c.kind, ChangeKind::Added | ChangeKind::Extended)),
     };
     let protocol_version_differs = (before.protocol_version != after.protocol_version).then(|| {
         [
@@ -290,6 +336,15 @@ fn compare(
             Some(_) => {}
         }
     }
+    added(surface, before, after, out);
+}
+
+fn added<T>(
+    surface: &'static str,
+    before: &BTreeMap<String, T>,
+    after: &BTreeMap<String, T>,
+    out: &mut Vec<Change>,
+) {
     for name in after.keys() {
         if !before.contains_key(name) {
             out.push(Change {
@@ -300,6 +355,65 @@ fn compare(
             });
         }
     }
+}
+
+/// Event types by the rule a subscriber lives under: schemas judged by
+/// [`is_additive_change`], delivery modes that may grow but not shrink.
+/// A changed description is a change, as it is for a tool: a model reads
+/// it.
+fn compare_events(
+    before: &BTreeMap<String, EventEntry>,
+    after: &BTreeMap<String, EventEntry>,
+    out: &mut Vec<Change>,
+) {
+    for (name, old) in before {
+        let Some(new) = after.get(name) else {
+            out.push(Change {
+                surface: "events",
+                name: name.clone(),
+                kind: ChangeKind::Removed,
+                fields: Vec::new(),
+            });
+            continue;
+        };
+        if new == old {
+            continue;
+        }
+        let mut fields = Vec::new();
+        let mut breaking = false;
+        if old.description != new.description {
+            fields.push("description");
+            breaking = true;
+        }
+        if old.delivery != new.delivery {
+            fields.push("delivery");
+            breaking |= !old.delivery.iter().all(|mode| new.delivery.contains(mode));
+        }
+        if old.input_schema != new.input_schema {
+            fields.push("inputSchema");
+            breaking |=
+                !is_additive_change(&old.input_schema, &new.input_schema, SchemaRole::Input);
+        }
+        if old.payload_schema != new.payload_schema {
+            fields.push("payloadSchema");
+            breaking |= !is_additive_change(
+                &old.payload_schema,
+                &new.payload_schema,
+                SchemaRole::Payload,
+            );
+        }
+        out.push(Change {
+            surface: "events",
+            name: name.clone(),
+            kind: if breaking {
+                ChangeKind::Changed
+            } else {
+                ChangeKind::Extended
+            },
+            fields,
+        });
+    }
+    added("events", before, after, out);
 }
 
 #[cfg(test)]
@@ -377,6 +491,82 @@ mod tests {
             d.protocol_version_differs,
             Some(["2026-07-28".to_owned(), "2025-11-25".to_owned()])
         );
+    }
+
+    fn event(entry: EventEntry) -> Snapshot {
+        Snapshot {
+            protocol_version: "2026-07-28".to_owned(),
+            events: BTreeMap::from([("e".to_owned(), entry)]),
+            ..Default::default()
+        }
+    }
+
+    fn order_event() -> EventEntry {
+        EventEntry {
+            description: Some("an order".to_owned()),
+            delivery: vec!["poll".to_owned()],
+            input_schema: json!({ "type": "object", "properties": { "shop": { "type": "string" } } }),
+            payload_schema: json!({
+                "type": "object",
+                "properties": { "id": { "type": "string" } },
+                "required": ["id"]
+            }),
+        }
+    }
+
+    #[test]
+    fn an_event_that_only_describes_more_is_extended_and_compatible() {
+        let before = event(order_event());
+        let mut grown = order_event();
+        grown.delivery.push("webhook".to_owned());
+        grown.payload_schema["properties"]["total"] = json!({ "type": "number" });
+        grown.input_schema["properties"]["region"] = json!({ "type": "string" });
+        let after = event(grown);
+
+        let d = diff(&before, &after, DiffMode::Compatible);
+        assert!(d.ok, "{:?}", d.changes);
+        assert_eq!(d.changes[0].kind, ChangeKind::Extended);
+        assert_eq!(
+            d.changes[0].fields,
+            vec!["delivery", "inputSchema", "payloadSchema"]
+        );
+        assert!(!diff(&before, &after, DiffMode::Strict).ok);
+    }
+
+    #[test]
+    fn an_event_that_breaks_a_subscriber_is_changed() {
+        let before = event(order_event());
+
+        let mut fewer_modes = order_event();
+        fewer_modes.delivery = vec!["push".to_owned()];
+        let mut lost_guarantee = order_event();
+        lost_guarantee.payload_schema["required"] = json!([]);
+        let mut new_demand = order_event();
+        new_demand.input_schema["required"] = json!(["shop"]);
+        let mut retyped = order_event();
+        retyped.payload_schema["properties"]["id"] = json!({ "type": "number" });
+
+        for (case, after) in [
+            ("a delivery mode removed", fewer_modes),
+            ("a payload field no longer required", lost_guarantee),
+            ("an argument newly required", new_demand),
+            ("a payload field retyped", retyped),
+        ] {
+            let d = diff(&before, &event(after), DiffMode::Compatible);
+            assert!(!d.ok, "{case}");
+            assert_eq!(d.changes[0].kind, ChangeKind::Changed, "{case}");
+        }
+    }
+
+    #[test]
+    fn a_snapshot_without_events_still_reads() {
+        let old: Snapshot =
+            serde_json::from_value(json!({ "protocol_version": "2025-11-25", "tools": {} }))
+                .unwrap();
+        assert!(old.events.is_empty());
+        let d = diff(&old, &event(order_event()), DiffMode::Compatible);
+        assert!(d.ok);
+        assert_eq!(d.changes[0].kind, ChangeKind::Added);
     }
 
     #[test]

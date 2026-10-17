@@ -6,6 +6,7 @@ import { ToolsPane } from '@/components/ToolsPane';
 import { ResourcesPane } from '@/components/ResourcesPane';
 import { PromptsPane } from '@/components/PromptsPane';
 import { SubscriptionsPane } from '@/components/SubscriptionsPane';
+import { EventsPane } from '@/components/EventsPane';
 import { HistoryPane } from '@/components/HistoryPane';
 import { DiagnosePane } from '@/components/DiagnosePane';
 import { WirePane } from '@/components/WirePane';
@@ -13,12 +14,14 @@ import { PendingRequests } from '@/components/PendingRequests';
 import { TargetPicker } from '@/components/TargetPicker';
 import { type HistoryEntry, paneOf, record } from '@/lib/history';
 import { useSubscription } from '@/lib/subscriptions';
+import { useEventStream } from '@/lib/event-stream';
 
 type Pane =
   | 'tools'
   | 'resources'
   | 'prompts'
   | 'subscriptions'
+  | 'events'
   | 'history'
   | 'diagnose'
   | 'wire';
@@ -28,6 +31,7 @@ const PANES: Pane[] = [
   'resources',
   'prompts',
   'subscriptions',
+  'events',
   'history',
   'diagnose',
   'wire',
@@ -93,6 +97,7 @@ export function App() {
   // when you click another tab, and neither a held-open stream nor a record
   // of what you have done should end because you looked at something else.
   const subscription = useSubscription(selected?.id);
+  const eventStream = useEventStream(selected?.id);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [replay, setReplay] = useState<HistoryEntry | null>(null);
 
@@ -219,6 +224,14 @@ export function App() {
                   {subscription.state.unseen}
                 </span>
               )}
+              {p === 'events' && eventStream.state.unseen > 0 && (
+                <span
+                  className="ml-1 rounded bg-emerald-500/20 px-1 text-emerald-700"
+                  data-testid="events-unseen"
+                >
+                  {eventStream.state.unseen}
+                </span>
+              )}
             </button>
           ))}
         </nav>
@@ -254,6 +267,16 @@ export function App() {
                 onStop={subscription.stop}
                 onClear={subscription.clearPushes}
                 onSeen={subscription.markSeen}
+              />
+            )}
+            {pane === 'events' && (
+              <EventsPane
+                {...paneProps}
+                stream={eventStream.state}
+                onStreamStart={eventStream.start}
+                onStreamStop={eventStream.stop}
+                onStreamClear={eventStream.clear}
+                onSeen={eventStream.markSeen}
               />
             )}
             {pane === 'history' && (

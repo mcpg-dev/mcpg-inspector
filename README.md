@@ -10,10 +10,14 @@ verbs. Runs standalone, supervised by the gateway
 One engine, three faces: the web UI, the terminal UI, and the CLI verbs
 all drive the same `/api/v1` surface this server exposes.
 
-Signed release tarballs live on this repository's Releases page. Install:
+The full inspector ships as the image `ghcr.io/mcpg-dev/mcpg-inspector`, or
+builds from this repository with `cargo build --release`. The signed release
+tarballs on this repository's Releases page carry the terminal UI alone,
+`mcpg-inspector-tui` (also the image `ghcr.io/mcpg-dev/mcpg-inspector-tui`).
+Install it with:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/mcpg-dev/mcpg/main/install.sh | sh -s -- --bin mcpg-inspector
+curl -fsSL https://raw.githubusercontent.com/mcpg-dev/mcpg/main/install.sh | sh -s -- --bin mcpg-inspector-tui
 ```
 
 This repository is a read-only mirror — issues welcome here, code

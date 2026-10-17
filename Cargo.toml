@@ -1,6 +1,6 @@
 [package]
 name = "mcpg-inspector"
-version = "0.1.0-beta.43"
+version = "0.1.0-beta.44"
 edition = "2024"
 license = "Apache-2.0"
 description = "MCP inspector for mcpg — web UI, TUI and scriptable CLI in one binary"
@@ -24,7 +24,7 @@ tui = ["dep:mcpg-inspector-tui"]
 
 [dependencies]
 include_dir = { version = "0.7", optional = true }
-mcpg-inspector-tui = { git = "https://github.com/mcpg-dev/mcpg-inspector-tui", tag = "v0.1.0-beta.39", version = "=0.1.0-beta.39", optional = true }
+mcpg-inspector-tui = { git = "https://github.com/mcpg-dev/mcpg-inspector-tui", tag = "v0.1.0-beta.40", version = "=0.1.0-beta.40", optional = true }
 async-stream = "0.3"
 async-trait = "0.1"
 axum = "0.8"
@@ -33,16 +33,19 @@ futures = "0.3"
 # private_key_jwt client assertions and DPoP proofs. aws_lc_rs is the
 # backend the other in-tree JWT users pin; use_pem enables the PEM loaders.
 jsonwebtoken = { version = "11.1", default-features = false, features = ["aws_lc_rs", "use_pem"] }
-mcpg-mcp-client = { git = "https://github.com/mcpg-dev/mcpg-mcp-client", tag = "v0.1.0-beta.40", version = "=0.1.0-beta.40" }
-mcpg-mcp-wire = { git = "https://github.com/mcpg-dev/mcpg-mcp-wire", tag = "v0.1.0-beta.38", version = "=0.1.0-beta.38" }
+mcpg-mcp-client = { git = "https://github.com/mcpg-dev/mcpg-mcp-client", tag = "v0.1.0-beta.41", version = "=0.1.0-beta.41" }
+mcpg-mcp-wire = { git = "https://github.com/mcpg-dev/mcpg-mcp-wire", tag = "v0.1.0-beta.39", version = "=0.1.0-beta.39" }
+# Verifies the MCP Events deliveries a server sends to the inspector's
+# callbacks.
+mcpg-standard-webhooks = { git = "https://github.com/mcpg-dev/mcpg-standard-webhooks", tag = "v0.1.0-beta.1", version = "=0.1.0-beta.1" }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.11"
 serde_yaml = "0.9"
-mcpg-sensitive = { git = "https://github.com/mcpg-dev/mcpg-sensitive", tag = "v0.1.0-beta.38", version = "=0.1.0-beta.38" }
-mcpg-plugin-protocol = { git = "https://github.com/mcpg-dev/mcpg-plugin-protocol", tag = "v0.1.0-beta.39", version = "=0.1.0-beta.39" }
-mcpg-aauth-core = { git = "https://github.com/mcpg-dev/mcpg-aauth-core", tag = "v0.1.0-beta.38", version = "=0.1.0-beta.38" }
-mcpg-cli-core = { git = "https://github.com/mcpg-dev/mcpg-cli-core", tag = "v0.1.0-beta.38", version = "=0.1.0-beta.38", default-features = false, features = ["oidc"] }
+mcpg-sensitive = { git = "https://github.com/mcpg-dev/mcpg-sensitive", tag = "v0.1.0-beta.39", version = "=0.1.0-beta.39" }
+mcpg-plugin-protocol = { git = "https://github.com/mcpg-dev/mcpg-plugin-protocol", tag = "v0.1.0-beta.40", version = "=0.1.0-beta.40" }
+mcpg-aauth-core = { git = "https://github.com/mcpg-dev/mcpg-aauth-core", tag = "v0.1.0-beta.39", version = "=0.1.0-beta.39" }
+mcpg-cli-core = { git = "https://github.com/mcpg-dev/mcpg-cli-core", tag = "v0.1.0-beta.39", version = "=0.1.0-beta.39", default-features = false, features = ["oidc"] }
 url = "2"
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync"] }
@@ -52,4 +55,8 @@ uuid = { version = "1", features = ["v4"] }
 webbrowser = "1"
 
 [dev-dependencies]
+# A signer of its own for deliveries the Standard Webhooks crate refuses
+# to sign.
+base64 = "0.23"
+hmac = "0.13"
 wiremock = "0.6"

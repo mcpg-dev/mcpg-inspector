@@ -44,6 +44,8 @@ enum Command {
     Snapshot(verbs::SnapshotArgs),
     /// Diff a target against a snapshot file or a second target
     Diff(verbs::DiffArgs),
+    /// MCP Events: list, poll, stream, subscribe, unsubscribe
+    Events(verbs::EventsArgs),
     /// Generate an AAuth agent identity: an Ed25519 key plus the
     /// well-known documents that make it verifiable
     AauthKeygen(verbs::AauthKeygenArgs),
@@ -85,6 +87,7 @@ fn main() {
         Command::Fuzz(args) => verbs::run_fuzz(args),
         Command::Snapshot(args) => verbs::run_snapshot(args),
         Command::Diff(args) => verbs::run_diff(args),
+        Command::Events(args) => verbs::run_events(args),
         Command::AauthKeygen(args) => verbs::run_aauth_keygen(args),
     }
 }

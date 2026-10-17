@@ -5,6 +5,7 @@ use mcpg_mcp_client::upstream::{McpUpstream, SubscriptionSpec, UpstreamError, co
 use mcpg_mcp_client::wire::{
     UpstreamPrompt, UpstreamResource, UpstreamResourceTemplate, UpstreamTool,
 };
+use mcpg_mcp_wire::v_2026_07_28::extensions::events::wire as events;
 use serde_json::{Value, json};
 
 use super::responders::{BridgeHandler, MAX_MRTR_ROUNDS, Responder};
@@ -121,7 +122,7 @@ impl Session {
                 {
                     return Err(SessionError::Client(UpstreamError::Http {
                         status: 401,
-                        jsonrpc_code: None,
+                        error: None,
                     }));
                 }
                 connect_upstream(opts).await.map_err(SessionError::Client)?
@@ -324,6 +325,47 @@ impl Session {
         self.upstream.open_subscriptions(spec).await
     }
 
+    /// What the server advertises for MCP Events, when the connect showed
+    /// its capabilities and they name the extension.
+    pub fn events_capability(&self) -> Option<events::EventsCapability> {
+        events::EventsCapability::advertised_in(self.upstream.server_capabilities()?)
+    }
+
+    /// Every MCP Events type the server lists, all pages.
+    pub async fn list_events(&self) -> Result<Vec<events::EventDescriptor>, UpstreamError> {
+        self.upstream.list_events().await
+    }
+
+    pub async fn poll_events(
+        &self,
+        params: &events::PollEventsParams,
+    ) -> Result<events::PollEventsResult, UpstreamError> {
+        self.upstream.poll_events(params).await
+    }
+
+    /// An `events/stream`: its notifications as they arrive, for as long
+    /// as the caller holds it.
+    pub async fn open_event_stream(
+        &self,
+        params: &events::StreamEventsParams,
+    ) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = Value> + Send>>, UpstreamError> {
+        self.upstream.open_event_stream(params).await
+    }
+
+    pub async fn subscribe_events(
+        &self,
+        params: &events::SubscribeEventsParams,
+    ) -> Result<events::SubscribeEventsResult, UpstreamError> {
+        self.upstream.subscribe_events(params).await
+    }
+
+    pub async fn unsubscribe_events(
+        &self,
+        params: &events::UnsubscribeEventsParams,
+    ) -> Result<events::UnsubscribeEventsResult, UpstreamError> {
+        self.upstream.unsubscribe_events(params).await
+    }
+
     pub async fn close(&self) {
         self.upstream.close().await;
     }
@@ -346,6 +388,7 @@ fn channel_of(channel: &str) -> mcpg_mcp_client::tap::FrameChannel {
         "http-response" => mcpg_mcp_client::tap::FrameChannel::HttpResponse,
         "http-sse" => mcpg_mcp_client::tap::FrameChannel::HttpSse,
         "stdio-stderr" => mcpg_mcp_client::tap::FrameChannel::StdioStderr,
+        "webhook" => mcpg_mcp_client::tap::FrameChannel::Webhook,
         _ => mcpg_mcp_client::tap::FrameChannel::Stdio,
     }
 }

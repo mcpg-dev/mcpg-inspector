@@ -155,7 +155,8 @@ pub async fn exec(
         .await
         .map_err(ExecError::Connect)?;
 
-    let outcome = ops::dispatch(&session, op, params).await;
+    let ctx = ops::OpContext::default();
+    let outcome = ops::dispatch(&ctx, &session, op, params).await;
     let negotiated_version = session.negotiated_version();
     session.close().await;
 

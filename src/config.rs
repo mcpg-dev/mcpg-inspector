@@ -73,7 +73,8 @@ pub struct ServeArgs {
         long,
         env = "MCPG_INSPECTOR_OIDC_CLIENT_SECRET",
         hide_env_values = true,
-        value_name = "SECRET"
+        value_name = "SECRET",
+        allow_hyphen_values = true
     )]
     pub oidc_client_secret: Option<String>,
 

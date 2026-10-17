@@ -31,6 +31,12 @@ pub struct ApiState {
     /// Frames one stateless call may return. Bounds a response the caller
     /// asked for rather than a buffer the server keeps.
     pub exec_frame_limit: usize,
+    /// Routes each MCP Events delivery to the callback that minted it.
+    pub hooks: Arc<crate::engine::events::HookDirectory>,
+    /// Where a server reaches this inspector's callbacks unless a
+    /// subscribe names a base of its own: the public URL when hosted, the
+    /// bound address when local. Set once the listener is bound.
+    pub callback_base: Arc<std::sync::OnceLock<String>>,
 }
 
 /// The caller's workspace, attached to the request by

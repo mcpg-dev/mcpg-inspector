@@ -8,6 +8,7 @@ pub mod checks;
 pub mod client_auth;
 pub mod dpop;
 pub mod eventlog;
+pub mod events;
 pub mod gateway;
 pub mod idjag;
 pub mod keys;

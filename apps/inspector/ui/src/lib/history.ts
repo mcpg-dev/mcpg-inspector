@@ -10,14 +10,14 @@
  * switching tabs is navigation, not cancellation.
  */
 
-export type HistoryKind = 'tools.call' | 'resources.read' | 'prompts.get';
+export type HistoryKind = 'tools.call' | 'resources.read' | 'prompts.get' | 'events.poll';
 
 export interface HistoryEntry {
   /** Monotonic within a session; also the React key. */
   seq: number;
   kind: HistoryKind;
   targetId: string;
-  /** Tool name, resource URI, or prompt name. */
+  /** Tool name, resource URI, prompt name, or event type. */
   subject: string;
   /** What was sent — enough to run it again. */
   args: unknown;
@@ -52,11 +52,13 @@ export function verbOf(kind: HistoryKind): string {
       return 'read';
     case 'prompts.get':
       return 'rendered';
+    case 'events.poll':
+      return 'polled';
   }
 }
 
 /** Which pane an entry belongs to, for "open this again". */
-export function paneOf(kind: HistoryKind): 'tools' | 'resources' | 'prompts' {
+export function paneOf(kind: HistoryKind): 'tools' | 'resources' | 'prompts' | 'events' {
   switch (kind) {
     case 'tools.call':
       return 'tools';
@@ -64,6 +66,8 @@ export function paneOf(kind: HistoryKind): 'tools' | 'resources' | 'prompts' {
       return 'resources';
     case 'prompts.get':
       return 'prompts';
+    case 'events.poll':
+      return 'events';
   }
 }
 

@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use mcpg_mcp_client::tap::SharedTap;
 use mcpg_mcp_client::upstream::UpstreamError;
+use mcpg_mcp_wire::v_2026_07_28::extensions::events::wire::arguments_from;
 use serde_json::{Value, json};
 
 use crate::engine::client_auth::{AssertionAudience, AssertionKey, ClientAuthMethod};
@@ -13,6 +14,7 @@ use crate::engine::eventlog::StderrWirePrinter;
 use crate::engine::idjag::SubjectTokenType;
 use crate::engine::keys::SigningAlg;
 use crate::engine::oauth::ClientAuthOptions;
+use crate::engine::ops::{self, Op, OpContext, OpError};
 use crate::engine::responders::{MockAnswers, ResponderPolicy, Root};
 use crate::engine::session::{Session, SessionError};
 use crate::engine::snapshot::DiffMode;
@@ -24,7 +26,12 @@ pub struct TargetArgs {
     /// target object
     pub target: String,
     /// Bearer token sent to the target
-    #[arg(long, env = "MCPG_INSPECTOR_BEARER", hide_env_values = true)]
+    #[arg(
+        long,
+        env = "MCPG_INSPECTOR_BEARER",
+        hide_env_values = true,
+        allow_hyphen_values = true
+    )]
     pub bearer: Option<String>,
     /// Present --bearer as a DPoP-bound token (RFC 9449), proving
     /// possession with the key in this file: the private JWK `login
@@ -53,11 +60,13 @@ pub struct TargetArgs {
     // ── AAuth ──────────────────────────────────────────────────────
     /// Sign requests with AAuth using this Ed25519 seed (unpadded
     /// base64url, 32 bytes). `mcpg inspector aauth-keygen` prints one.
+    // A base64url seed may begin with `-`; it is still the value.
     #[arg(
         long,
         env = "MCPG_INSPECTOR_AAUTH_KEY",
         hide_env_values = true,
-        value_name = "SEED"
+        value_name = "SEED",
+        allow_hyphen_values = true
     )]
     pub aauth_key: Option<String>,
     /// Agent identifier to self-issue an agent token for,
@@ -272,6 +281,93 @@ pub struct FuzzArgs {
     pub include_writes: bool,
 }
 
+#[derive(clap::Args, Debug)]
+pub struct EventsArgs {
+    #[command(subcommand)]
+    pub verb: EventsVerb,
+}
+
+/// The MCP Events verbs.
+#[derive(clap::Subcommand, Debug)]
+pub enum EventsVerb {
+    /// List the event types a target offers
+    List(EventsListArgs),
+    /// Poll one event type once
+    Poll(EventsReadArgs),
+    /// Hold an `events/stream` open and print each frame
+    Stream(EventsReadArgs),
+    /// Make a webhook subscription whose callback is this command, print
+    /// each delivery, then unsubscribe
+    Subscribe(EventsSubscribeArgs),
+    /// End a webhook subscription made elsewhere, by its callback URL
+    Unsubscribe(EventsUnsubscribeArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct EventsListArgs {
+    #[command(flatten)]
+    pub target: TargetArgs,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct EventsReadArgs {
+    #[command(flatten)]
+    pub target: TargetArgs,
+    /// Event type name
+    pub name: String,
+    /// Subscription arguments: inline JSON, or @file
+    #[arg(long = "args", value_name = "JSON|@FILE")]
+    pub args: Option<String>,
+    /// Read on from this cursor instead of from now
+    #[arg(long)]
+    pub cursor: Option<String>,
+    /// Most events one poll returns
+    #[arg(long)]
+    pub max_events: Option<u32>,
+    /// How long a stream stays open, in seconds; until Ctrl-C when unset
+    #[arg(long)]
+    pub seconds: Option<u64>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct EventsSubscribeArgs {
+    #[command(flatten)]
+    pub target: TargetArgs,
+    /// Event type name
+    pub name: String,
+    /// Subscription arguments: inline JSON, or @file
+    #[arg(long = "args", value_name = "JSON|@FILE")]
+    pub args: Option<String>,
+    /// Where this command listens for deliveries
+    #[arg(long, default_value = "127.0.0.1:0")]
+    pub listen: std::net::SocketAddr,
+    /// The URL the server reaches the listener at, when that is not the
+    /// listen address: a tunnel, a proxy. A server that accepts only
+    /// public https callbacks needs one.
+    #[arg(long, value_name = "URL")]
+    pub callback_base: Option<String>,
+    /// Requested lifetime of the subscription, in milliseconds
+    #[arg(long)]
+    pub ttl_ms: Option<u64>,
+    /// How long to receive, in seconds; until Ctrl-C when unset
+    #[arg(long)]
+    pub seconds: Option<u64>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct EventsUnsubscribeArgs {
+    #[command(flatten)]
+    pub target: TargetArgs,
+    /// Event type name
+    pub name: String,
+    /// The callback URL the subscription delivers to
+    #[arg(long)]
+    pub url: String,
+    /// Subscription arguments: inline JSON, or @file
+    #[arg(long = "args", value_name = "JSON|@FILE")]
+    pub args: Option<String>,
+}
+
 /// Exit-code classes (the crate-root contract).
 const EXIT_USAGE: i32 = 1;
 const EXIT_CONNECT: i32 = 2;
@@ -480,6 +576,226 @@ pub fn run_bench(args: BenchArgs) -> ! {
         let doc = serde_json::to_value(&report).unwrap_or_else(|_| json!({}));
         Ok((doc, if any_failed { EXIT_OP } else { 0 }))
     })
+}
+
+/// MCP Events. `list` and `poll` print what the API's ops return, so a
+/// script and the web UI read one shape.
+pub fn run_events(args: EventsArgs) -> ! {
+    match args.verb {
+        EventsVerb::List(args) => run(args.target, move |session| async move {
+            let body = events_op(&session, Op::ListEvents, json!({})).await?;
+            Ok((body, 0))
+        }),
+        EventsVerb::Poll(args) => {
+            let arguments = event_arguments(args.args.as_deref(), args.target.json);
+            run(args.target, move |session| async move {
+                let mut params = json!({ "name": args.name, "arguments": arguments });
+                if let Some(cursor) = args.cursor {
+                    params["cursor"] = json!(cursor);
+                }
+                if let Some(max) = args.max_events {
+                    params["maxEvents"] = json!(max);
+                }
+                let body = events_op(&session, Op::PollEvents, params).await?;
+                Ok((body, 0))
+            })
+        }
+        EventsVerb::Stream(args) => {
+            let arguments = event_arguments(args.args.as_deref(), args.target.json);
+            let json_out = args.target.json;
+            run(args.target, move |session| async move {
+                use futures::StreamExt;
+                let params =
+                    mcpg_mcp_wire::v_2026_07_28::extensions::events::wire::StreamEventsParams {
+                        name: args.name.clone(),
+                        arguments,
+                        cursor: args.cursor,
+                        max_age_ms: None,
+                        meta: None,
+                    };
+                let mut frames = session.open_event_stream(&params).await?;
+                let watch = Arc::new(crate::engine::events::EventWatch::new());
+                let tracker = watch.stream_opened(&args.name);
+                let mut stop = until(args.seconds);
+                loop {
+                    let next = tokio::select! {
+                        next = frames.next() => next,
+                        () = &mut stop => None,
+                    };
+                    let Some(frame) = next else { break };
+                    tracker.frame(&frame);
+                    print_line(&frame, json_out);
+                }
+                let (report, checks) = watch.streams().pop().expect("one stream");
+                Ok((json!({ "stream": report, "checks": checks }), 0))
+            })
+        }
+        EventsVerb::Subscribe(args) => run_events_subscribe(args),
+        EventsVerb::Unsubscribe(args) => {
+            let arguments = event_arguments(args.args.as_deref(), args.target.json);
+            run(args.target, move |session| async move {
+                use mcpg_mcp_wire::v_2026_07_28::extensions::events::wire::{
+                    DeliveryMode, UnsubscribeDelivery, UnsubscribeEventsParams,
+                };
+                session
+                    .unsubscribe_events(&UnsubscribeEventsParams {
+                        name: args.name,
+                        arguments,
+                        delivery: UnsubscribeDelivery {
+                            mode: Some(DeliveryMode::Webhook.as_str().to_owned()),
+                            url: args.url.clone(),
+                        },
+                        meta: None,
+                    })
+                    .await?;
+                Ok((json!({ "unsubscribed": args.url }), 0))
+            })
+        }
+    }
+}
+
+/// `events subscribe`: listen, subscribe with this listener as the
+/// callback, print what arrives, unsubscribe.
+fn run_events_subscribe(args: EventsSubscribeArgs) -> ! {
+    let arguments = event_arguments(args.args.as_deref(), args.target.json);
+    let json_out = args.target.json;
+    let std_listener = match std::net::TcpListener::bind(args.listen) {
+        Ok(listener) => listener,
+        Err(e) => fail(
+            EXIT_USAGE,
+            "usage",
+            &format!("cannot listen on {}: {e}", args.listen),
+            json_out,
+        ),
+    };
+    let _ = std_listener.set_nonblocking(true);
+    let bound = std_listener.local_addr().expect("a bound address");
+    let base = args
+        .callback_base
+        .clone()
+        .unwrap_or_else(|| format!("http://{bound}"));
+    run(args.target, move |session| async move {
+        use crate::engine::events::{EventWatch, HookDirectory};
+        let directory = Arc::new(HookDirectory::new());
+        let watch = Arc::new(EventWatch::new());
+        let listener = tokio::net::TcpListener::from_std(std_listener)
+            .map_err(|e| UpstreamError::Transport(format!("listen: {e}")))?;
+        let app = crate::api::routes::hooks_router(Arc::clone(&directory));
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        eprintln!("listening for deliveries at {base}/hooks/…");
+        let ctx = OpContext {
+            target: "cli",
+            hooks: Some((&watch, &directory)),
+            callback_base: Some(&base),
+            wire: None,
+        };
+        let mut params = json!({ "name": args.name, "arguments": arguments });
+        if let Some(ttl) = args.ttl_ms {
+            params["ttlMs"] = json!(ttl);
+        }
+        let subscribed = ops::dispatch(&ctx, &session, Op::SubscribeEvents, &params)
+            .await
+            .map_err(op_failure)?;
+        let sid = subscribed["hook"]["sid"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        print_line(&json!({ "subscribed": subscribed }), json_out);
+        let mut stop = until(args.seconds);
+        let mut printed = 0;
+        loop {
+            tokio::select! {
+                () = tokio::time::sleep(std::time::Duration::from_millis(200)) => {}
+                () = &mut stop => break,
+            }
+            let seen = printed;
+            for delivery in watch
+                .hooks()
+                .into_iter()
+                .flat_map(|hook| hook.deliveries)
+                .filter(|delivery| delivery.seq > seen)
+            {
+                printed = delivery.seq;
+                print_line(&json!(delivery), json_out);
+            }
+        }
+        let view = watch.hooks().into_iter().find(|hook| hook.sid == sid);
+        let unsubscribed = ops::dispatch(
+            &ctx,
+            &session,
+            Op::UnsubscribeEvents,
+            &json!({ "sid": sid }),
+        )
+        .await
+        .map_err(op_failure);
+        server.abort();
+        unsubscribed?;
+        let (deliveries, checks) = view
+            .map(|hook| (hook.deliveries.last().map_or(0, |d| d.seq), hook.checks))
+            .unwrap_or_default();
+        Ok((
+            json!({ "deliveries": deliveries, "checks": checks, "unsubscribed": sid }),
+            0,
+        ))
+    })
+}
+
+/// The `--args` of an events verb as an object; absent is `{}`.
+fn event_arguments(input: Option<&str>, json_out: bool) -> serde_json::Map<String, Value> {
+    let parsed = match input.map(parse_args_input).transpose() {
+        Ok(parsed) => parsed,
+        Err(message) => fail(EXIT_USAGE, "usage", &message, json_out),
+    };
+    arguments_from(parsed.as_ref()).unwrap_or_else(|_| {
+        fail(
+            EXIT_USAGE,
+            "usage",
+            "--args must be a JSON object",
+            json_out,
+        )
+    })
+}
+
+/// A future that ends at Ctrl-C, or after `seconds` when they are given.
+fn until(seconds: Option<u64>) -> futures::future::BoxFuture<'static, ()> {
+    Box::pin(async move {
+        let interrupted = async {
+            let _ = tokio::signal::ctrl_c().await;
+        };
+        match seconds {
+            Some(seconds) => tokio::select! {
+                () = tokio::time::sleep(std::time::Duration::from_secs(seconds)) => {}
+                () = interrupted => {}
+            },
+            None => interrupted.await,
+        }
+    })
+}
+
+/// One line of a long-running verb's output.
+fn print_line(doc: &Value, json_out: bool) {
+    if json_out {
+        println!("{doc}");
+    } else {
+        println!("{}", serde_json::to_string_pretty(doc).expect("serialize"));
+    }
+}
+
+/// One events op with no callback context, its failure as the CLI's.
+async fn events_op(session: &Session, op: Op, params: Value) -> Result<Value, UpstreamError> {
+    ops::dispatch(&OpContext::default(), session, op, &params)
+        .await
+        .map_err(op_failure)
+}
+
+/// An op failure as an upstream one, so it exits by the same contract.
+fn op_failure(error: OpError) -> UpstreamError {
+    match error {
+        OpError::Client(error) => error,
+        OpError::Params(message) => UpstreamError::Protocol(message),
+    }
 }
 
 /// What does it do with input its own schema forbids?
@@ -817,7 +1133,7 @@ fn error_exit_class(e: &UpstreamError) -> i32 {
             status: 401 | 403, ..
         } => EXIT_AUTH,
         UpstreamError::Connect(_) | UpstreamError::Transport(_) => EXIT_UNREACHABLE,
-        UpstreamError::JsonRpc { .. } => EXIT_OP,
+        _ if e.jsonrpc_code().is_some() => EXIT_OP,
         _ => EXIT_CONNECT,
     }
 }
@@ -829,12 +1145,14 @@ fn error_class(e: &UpstreamError) -> &'static str {
         } => "auth_required",
         UpstreamError::Connect(_) => "connect",
         UpstreamError::Transport(_) => "unreachable",
+        _ if e.jsonrpc_code().is_some() => "jsonrpc",
         UpstreamError::Http { .. } => "http",
         UpstreamError::Protocol(_) => "protocol",
         UpstreamError::Rebinding(_) => "rebinding",
         UpstreamError::ResponseTooLarge { .. } => "response_too_large",
         UpstreamError::JsonRpc { .. } => "jsonrpc",
         UpstreamError::NotLinked { .. } => "not_linked",
+        UpstreamError::Unsupported(_) => "unsupported",
     }
 }
 
@@ -1001,7 +1319,8 @@ pub struct LoginArgs {
         long,
         env = "MCPG_INSPECTOR_CLIENT_SECRET",
         hide_env_values = true,
-        value_name = "SECRET"
+        value_name = "SECRET",
+        allow_hyphen_values = true
     )]
     pub client_secret: Option<String>,
     /// How --client-id authenticates at the token endpoint. Defaults to
@@ -1028,7 +1347,8 @@ pub struct LoginArgs {
         long,
         env = "MCPG_INSPECTOR_REGISTRATION_TOKEN",
         hide_env_values = true,
-        value_name = "TOKEN"
+        value_name = "TOKEN",
+        allow_hyphen_values = true
     )]
     pub registration_token: Option<String>,
     /// Scope to request (repeatable). Defaults to what the challenge asked
@@ -1059,6 +1379,7 @@ pub struct LoginArgs {
         env = "MCPG_INSPECTOR_SUBJECT_TOKEN",
         hide_env_values = true,
         value_name = "TOKEN",
+        allow_hyphen_values = true,
         conflicts_with = "subject_token_file"
     )]
     pub subject_token: Option<String>,
@@ -1076,7 +1397,8 @@ pub struct LoginArgs {
         long,
         env = "MCPG_INSPECTOR_IDP_CLIENT_SECRET",
         hide_env_values = true,
-        value_name = "SECRET"
+        value_name = "SECRET",
+        allow_hyphen_values = true
     )]
     pub idp_client_secret: Option<String>,
     /// How --idp-client-id authenticates at the IdP (default as for
@@ -1502,4 +1824,35 @@ async fn rediscover(spec: &TargetSpec) -> Result<mcpg_mcp_client::auth::Discover
         },
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser as _;
+
+    #[derive(clap::Parser)]
+    struct Probe {
+        #[command(flatten)]
+        list: ListArgs,
+    }
+
+    /// A base64url seed or an opaque token may begin with `-`.
+    #[test]
+    fn a_value_that_starts_with_a_hyphen_is_still_the_value() {
+        let probe = Probe::try_parse_from([
+            "probe",
+            "http://127.0.0.1:1/mcp",
+            "tools",
+            "--aauth-key",
+            "-Bq3xyz",
+            "--bearer",
+            "-opaque",
+            "--json",
+        ])
+        .unwrap();
+        assert_eq!(probe.list.target.aauth_key.as_deref(), Some("-Bq3xyz"));
+        assert_eq!(probe.list.target.bearer.as_deref(), Some("-opaque"));
+        assert!(probe.list.target.json);
+    }
 }

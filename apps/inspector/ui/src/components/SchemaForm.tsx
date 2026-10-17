@@ -149,7 +149,7 @@ export function SchemaForm({
           )}
           {!formable && (
             <p className="text-muted-foreground">
-              This tool declares no argument properties, so there is no form to build —
+              The schema declares no argument properties, so there is no form to build —
               what it accepts is whatever it accepts.
             </p>
           )}

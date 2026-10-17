@@ -10,11 +10,12 @@ use std::sync::Arc;
 
 use mcpg_inspector_tui::api::{Catalog, InspectorApi, PushStream};
 use mcpg_inspector_tui::schema::PromptArgument;
-use mcpg_inspector_tui::state::{PendingRow, PromptRow, ResourceRow, TargetRow, ToolRow};
+use mcpg_inspector_tui::state::{EventRow, PendingRow, PromptRow, ResourceRow, TargetRow, ToolRow};
 use mcpg_inspector_tui::view::{
     CheckRow, CheckSummary, GatewayCheckRow, GatewayPluginRow, GatewayView, Outcome, SessionView,
     WireRow,
 };
+use mcpg_mcp_wire::v_2026_07_28::extensions::events::wire as events;
 use serde_json::Value;
 
 use crate::engine::registry::{Engine, SessionState, TargetEntry};
@@ -143,6 +144,21 @@ impl InspectorApi for LocalApi {
                     .collect()
             }
             Err(e) => catalog.errors.push(format!("prompts/list: {e}")),
+        }
+        if let Ok(events) = session.list_events().await {
+            catalog.events = events
+                .into_iter()
+                .map(|event| EventRow {
+                    name: event.name,
+                    description: event.description,
+                    delivery: event
+                        .delivery
+                        .iter()
+                        .map(|mode| mode.as_str().to_owned())
+                        .collect(),
+                    input_schema: Some(event.input_schema),
+                })
+                .collect();
         }
         catalog
     }
@@ -292,15 +308,56 @@ impl InspectorApi for LocalApi {
     async fn subscribe(&self, id: &str, uris: &[String]) -> Result<PushStream, String> {
         let spec = mcpg_mcp_client::upstream::SubscriptionSpec {
             resource_uris: uris.to_vec(),
-            tools_list_changed: true,
-            prompts_list_changed: true,
-            resources_list_changed: true,
+            ..mcpg_mcp_client::upstream::SubscriptionSpec::all_list_changed()
         };
         self.session(id)
             .await?
             .subscribe(&spec)
             .await
             .map_err(|e| e.to_string())
+    }
+
+    async fn poll_events(&self, id: &str, name: &str, args: &Value) -> Result<Value, String> {
+        let params = events::PollEventsParams {
+            name: name.to_owned(),
+            arguments: event_arguments(args)?,
+            cursor: None,
+            max_age_ms: None,
+            max_events: None,
+            meta: None,
+        };
+        let result = self
+            .session(id)
+            .await?
+            .poll_events(&params)
+            .await
+            .map_err(|e| e.to_string())?;
+        serde_json::to_value(result).map_err(|e| e.to_string())
+    }
+
+    async fn event_stream(&self, id: &str, name: &str, args: &Value) -> Result<PushStream, String> {
+        use futures::StreamExt;
+        let params = events::StreamEventsParams {
+            name: name.to_owned(),
+            arguments: event_arguments(args)?,
+            cursor: None,
+            max_age_ms: None,
+            meta: None,
+        };
+        let entry = self.entry(id)?;
+        let mut frames = self
+            .session(id)
+            .await?
+            .open_event_stream(&params)
+            .await
+            .map_err(|e| e.to_string())?;
+        let tracker = entry.watch.stream_opened(name);
+        Ok(Box::pin(async_stream::stream! {
+            while let Some(frame) = frames.next().await {
+                tracker.frame(&frame);
+                yield frame;
+            }
+        }))
     }
 
     async fn recording(&self, id: &str) -> Result<String, String> {
@@ -351,6 +408,11 @@ impl InspectorApi for LocalApi {
             .map_err(|e| e.to_string())?;
         Ok(mcpg_inspector_tui::api::completion_values(&result))
     }
+}
+
+/// Subscription arguments, by the wire's rule.
+fn event_arguments(args: &Value) -> Result<serde_json::Map<String, Value>, String> {
+    events::arguments_from(Some(args)).map_err(str::to_owned)
 }
 
 /// The engine's session state as the screens read it.

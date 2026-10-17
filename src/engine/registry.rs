@@ -31,6 +31,9 @@ pub struct TargetEntry {
     /// Outlives any one session: a request queued by the last connect
     /// is still answerable after a reconnect.
     pub responder: Arc<Responder>,
+    /// The MCP Events webhook callbacks and push stream reports of this
+    /// target; a subscription outlives a reconnect too.
+    pub watch: Arc<crate::engine::events::EventWatch>,
     session: tokio::sync::Mutex<Option<Arc<Session>>>,
     state: RwLock<SessionState>,
 }
@@ -42,6 +45,7 @@ impl TargetEntry {
             spec,
             events: Arc::new(EventLog::new(frame_buffer)),
             responder: Arc::new(Responder::new(policy)),
+            watch: Arc::new(crate::engine::events::EventWatch::new()),
             session: tokio::sync::Mutex::new(None),
             state: RwLock::new(SessionState::Idle),
         }

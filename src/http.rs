@@ -123,7 +123,11 @@ async fn serve(args: &ServeArgs) -> std::io::Result<()> {
             args.rate_limit_burst,
         )),
         exec_frame_limit: 500,
+        hooks: Arc::new(crate::engine::events::HookDirectory::new()),
+        callback_base: Arc::default(),
     };
+    let hooks = crate::api::routes::hooks_router(Arc::clone(&state.hooks));
+    let callback_base = Arc::clone(&state.callback_base);
 
     let state_for_auth = state.clone();
     // Everything that carries data sits behind the guard. The SPA
@@ -146,10 +150,13 @@ async fn serve(args: &ServeArgs) -> std::io::Result<()> {
     // fetches is what the guard protects. Health probes are outside
     // for a different reason: the supervisor polls /readyz before it
     // can know a token.
+    // MCP Events callbacks are outside too: the server that delivers holds
+    // no inspector token.
     let mut app = Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
-        .route("/assets/{*path}", get(crate::static_ui::asset));
+        .route("/assets/{*path}", get(crate::static_ui::asset))
+        .merge(hooks);
     // Sign-in routes sit outside the guard — they are how a caller becomes
     // authorized, so guarding them would be a loop.
     if auth.hosted().is_some() {
@@ -169,6 +176,10 @@ async fn serve(args: &ServeArgs) -> std::io::Result<()> {
 
     let listener = tokio::net::TcpListener::bind(args.bind).await?;
     let bound = listener.local_addr()?;
+    let _ = callback_base.set(match auth.hosted() {
+        Some(hosted) => hosted.public_url().trim_end_matches('/').to_owned(),
+        None => format!("http://{bound}"),
+    });
     announce(&bound, &auth, args.open_browser);
     // `into_make_service_with_connect_info` is what makes the peer
     // address reachable in the guard; without it the limiter would see

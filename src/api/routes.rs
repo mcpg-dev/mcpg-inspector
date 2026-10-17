@@ -9,10 +9,14 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures::Stream;
+use mcpg_mcp_wire::v_2026_07_28::extensions::events::wire::VerificationResponse;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use std::sync::Arc;
+
 use super::{ApiState, Workspace};
+use crate::engine::events::{HOOKS_PATH, HookDirectory, HookReply, MAX_DELIVERY_BYTES};
 use crate::engine::ops::{self, Op, OpError};
 use crate::engine::registry::Engine;
 use crate::engine::session::SessionError;
@@ -40,7 +44,126 @@ pub fn router() -> Router<ApiState> {
         .route("/api/v1/targets/{id}/events", get(events))
         .route("/api/v1/targets/{id}/export", get(export))
         .route("/api/v1/targets/{id}/subscribe", get(subscribe))
+        .route("/api/v1/targets/{id}/event-streams", get(event_stream))
+        .route("/api/v1/targets/{id}/event-checks", get(event_checks))
         .route("/api/v1/exec", post(exec))
+}
+
+#[derive(Deserialize)]
+struct EventStreamQuery {
+    name: String,
+    /// The subscription arguments, as a JSON object.
+    #[serde(default)]
+    arguments: Option<String>,
+    #[serde(default)]
+    cursor: Option<String>,
+}
+
+/// Relay an `events/stream` of the target as SSE, one JSON-RPC message per
+/// event, and keep what it showed for the checks.
+async fn event_stream(
+    Workspace(engine): Workspace,
+    Path(id): Path<String>,
+    Query(query): Query<EventStreamQuery>,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, Response> {
+    use mcpg_mcp_wire::v_2026_07_28::extensions::events::wire::{
+        StreamEventsParams, arguments_from,
+    };
+    let entry = target(&engine, &id)?;
+    let session = entry.session().await.ok_or_else(|| {
+        fail(
+            StatusCode::CONFLICT,
+            "not_connected",
+            "connect the target before opening an event stream",
+        )
+    })?;
+    let invalid = |message: &str| fail(StatusCode::BAD_REQUEST, "invalid_params", message);
+    let parsed = match query.arguments.as_deref() {
+        None | Some("") => None,
+        Some(raw) => Some(
+            serde_json::from_str::<Value>(raw).map_err(|_| invalid("`arguments` is not JSON"))?,
+        ),
+    };
+    let arguments = arguments_from(parsed.as_ref()).map_err(invalid)?;
+    let params = StreamEventsParams {
+        name: query.name.clone(),
+        arguments,
+        cursor: query.cursor,
+        max_age_ms: None,
+        meta: None,
+    };
+    let mut frames = session
+        .open_event_stream(&params)
+        .await
+        .map_err(|e| fail(StatusCode::BAD_GATEWAY, "stream_failed", &e.to_string()))?;
+    let name = query.name;
+    let stream = async_stream::stream! {
+        use futures::StreamExt;
+        let tracker = entry.watch.stream_opened(&name);
+        while let Some(frame) = frames.next().await {
+            tracker.frame(&frame);
+            if let Ok(event) = Event::default().json_data(&frame) {
+                yield Ok(event);
+            }
+        }
+    };
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+/// What the target's MCP Events traffic showed: each webhook callback with
+/// its deliveries, each push stream, and their checks.
+async fn event_checks(
+    Workspace(engine): Workspace,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, Response> {
+    let entry = target(&engine, &id)?;
+    let streams: Vec<Value> = entry
+        .watch
+        .streams()
+        .into_iter()
+        .map(|(report, checks)| json!({ "stream": report, "checks": checks }))
+        .collect();
+    Ok(Json(json!({
+        "hooks": entry.watch.hooks(),
+        "streams": streams,
+    })))
+}
+
+/// `POST /hooks/{target}/{sid}`, routed by `directory`: one delivery to a
+/// callback this inspector minted. It sits outside the token guard, since
+/// the server that delivers holds no inspector token; only a delivery
+/// signed with the secret minted for its callback is taken, and nothing a
+/// delivery says is acted on.
+pub fn hooks_router(directory: Arc<HookDirectory>) -> Router {
+    Router::new()
+        .route(
+            &format!("{HOOKS_PATH}/{{target}}/{{sid}}"),
+            post(hook_delivery).layer(axum::extract::DefaultBodyLimit::max(MAX_DELIVERY_BYTES)),
+        )
+        .with_state(directory)
+}
+
+async fn hook_delivery(
+    State(directory): State<Arc<HookDirectory>>,
+    Path((target, sid)): Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    match directory.receive(&target, &sid, &headers, &body) {
+        HookReply::Accepted => Json(json!({})).into_response(),
+        HookReply::Challenge(challenge) => Json(VerificationResponse { challenge }).into_response(),
+        HookReply::Unknown => fail(StatusCode::NOT_FOUND, "unknown_hook", "no such callback"),
+        HookReply::Unauthorized => fail(
+            StatusCode::UNAUTHORIZED,
+            "bad_signature",
+            "signature verification failed",
+        ),
+        HookReply::BadRequest => fail(
+            StatusCode::BAD_REQUEST,
+            "bad_delivery",
+            "the body is not an event delivery",
+        ),
+    }
 }
 
 /// What this target requires for authorization. Deliberately does not
@@ -195,6 +318,7 @@ async fn disconnect(
 }
 
 async fn run_op(
+    State(state): State<ApiState>,
     Workspace(engine): Workspace,
     Path((id, op)): Path<(String, String)>,
     body: Option<Json<Value>>,
@@ -215,7 +339,13 @@ async fn run_op(
         )
     })?;
     let params = body.map(|Json(v)| v).unwrap_or_else(|| json!({}));
-    match ops::dispatch(&session, op, &params).await {
+    let ctx = ops::OpContext {
+        target: &entry.id,
+        hooks: Some((&entry.watch, &state.hooks)),
+        callback_base: state.callback_base.get().map(String::as_str),
+        wire: Some(&entry.events),
+    };
+    match ops::dispatch(&ctx, &session, op, &params).await {
         Ok(result) => Ok(Json(result)),
         Err(OpError::Params(message)) => {
             Err(fail(StatusCode::BAD_REQUEST, "invalid_params", &message))
@@ -571,6 +701,7 @@ async fn subscribe(
         tools_list_changed: query.lists,
         prompts_list_changed: query.lists,
         resources_list_changed: query.lists,
+        events_list_changed: false,
     };
 
     let mut pushes = session

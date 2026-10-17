@@ -4,10 +4,34 @@
 //! functions, which is what keeps `mcpg-inspector call` and the web
 //! UI's call button honestly equivalent.
 
-use mcpg_mcp_client::upstream::UpstreamError;
-use serde_json::{Value, json};
+use std::sync::Arc;
 
+use mcpg_mcp_client::upstream::UpstreamError;
+use mcpg_mcp_wire::v_2026_07_28::extensions::events::wire::{
+    DeliveryMode, PollEventsParams, SubscribeEventsParams, TtlRequest, UnsubscribeDelivery,
+    UnsubscribeEventsParams, WebhookDelivery, arguments_from,
+};
+use serde_json::{Map, Value, json};
+
+use super::eventlog::EventLog;
+use super::events::{EventWatch, HookDirectory};
 use super::session::Session;
+
+/// What an operation may use beyond the session.
+#[derive(Clone, Copy, Default)]
+pub struct OpContext<'a> {
+    /// The target the session belongs to.
+    pub target: &'a str,
+    /// The target's webhook callbacks, and the directory that routes
+    /// deliveries to them; `None` where nothing stays to receive one, as
+    /// in a stateless call.
+    pub hooks: Option<(&'a Arc<EventWatch>, &'a HookDirectory)>,
+    /// The base URL a server reaches this inspector's callbacks at, when
+    /// the caller names none.
+    pub callback_base: Option<&'a str>,
+    /// The wire log the callbacks write their deliveries to.
+    pub wire: Option<&'a Arc<EventLog>>,
+}
 
 /// Every operation the engine can run against a connected target.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -20,6 +44,10 @@ pub enum Op {
     ReadResource,
     GetPrompt,
     Complete,
+    ListEvents,
+    PollEvents,
+    SubscribeEvents,
+    UnsubscribeEvents,
 }
 
 impl Op {
@@ -34,6 +62,10 @@ impl Op {
             Self::ReadResource => "resources.read",
             Self::GetPrompt => "prompts.get",
             Self::Complete => "completion.complete",
+            Self::ListEvents => "events.list",
+            Self::PollEvents => "events.poll",
+            Self::SubscribeEvents => "events.subscribe",
+            Self::UnsubscribeEvents => "events.unsubscribe",
         }
     }
 
@@ -41,7 +73,7 @@ impl Op {
         Self::ALL.iter().copied().find(|op| op.as_str() == name)
     }
 
-    pub const ALL: [Op; 8] = [
+    pub const ALL: [Op; 12] = [
         Op::ListTools,
         Op::ListResources,
         Op::ListResourceTemplates,
@@ -50,6 +82,10 @@ impl Op {
         Op::ReadResource,
         Op::GetPrompt,
         Op::Complete,
+        Op::ListEvents,
+        Op::PollEvents,
+        Op::SubscribeEvents,
+        Op::UnsubscribeEvents,
     ];
 }
 
@@ -72,8 +108,32 @@ impl std::fmt::Display for OpError {
 
 /// Run one operation. `params` carries `name`/`arguments` for `tools.call`
 /// and `prompts.get`, and `uri` for `resources.read`; the list ops ignore it.
-pub async fn dispatch(session: &Session, op: Op, params: &Value) -> Result<Value, OpError> {
+/// The events ops take the extension's own params (`events.poll`:
+/// `name`, `arguments`, `cursor`, `maxEvents`; `events.subscribe`: `name`,
+/// `arguments`, `cursor`, `ttlMs`, and `callbackBase` for where the server
+/// reaches this inspector; `events.unsubscribe`: the `sid` subscribe
+/// returned).
+pub async fn dispatch(
+    ctx: &OpContext<'_>,
+    session: &Session,
+    op: Op,
+    params: &Value,
+) -> Result<Value, OpError> {
     match op {
+        Op::ListEvents => {
+            let mut body = json!({ "events": call(session.list_events().await)? });
+            if let Some(advertised) = session.events_capability() {
+                body["advertised"] = advertised.to_value();
+            }
+            Ok(body)
+        }
+        Op::PollEvents => {
+            let params: PollEventsParams = serde_json::from_value(params.clone())
+                .map_err(|e| OpError::Params(format!("events.poll: {e}")))?;
+            Ok(json!({ "result": call(session.poll_events(&params).await)? }))
+        }
+        Op::SubscribeEvents => subscribe(ctx, session, params).await,
+        Op::UnsubscribeEvents => unsubscribe(ctx, session, params).await,
         Op::ListTools => Ok(json!({ "tools": call(session.list_tools().await)? })),
         Op::ListResources => Ok(json!({ "resources": call(session.list_resources().await)? })),
         Op::ListResourceTemplates => Ok(json!({
@@ -121,6 +181,109 @@ pub async fn dispatch(session: &Session, op: Op, params: &Value) -> Result<Value
             }))
         }
     }
+}
+
+/// `events.subscribe`: a webhook subscription whose callback is this
+/// inspector. The secret is minted here and never returned: the inspector
+/// is the receiver.
+async fn subscribe(
+    ctx: &OpContext<'_>,
+    session: &Session,
+    params: &Value,
+) -> Result<Value, OpError> {
+    let (hooks, directory) = ctx.hooks.ok_or_else(|| {
+        OpError::Params(
+            "events.subscribe needs a registered target: a stateless call has no callback"
+                .to_owned(),
+        )
+    })?;
+    let name = params
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| OpError::Params("events.subscribe needs a `name`".to_owned()))?;
+    let arguments = arguments_of(params)?;
+    let base = params
+        .get("callbackBase")
+        .and_then(Value::as_str)
+        .or(ctx.callback_base)
+        .ok_or_else(|| {
+            OpError::Params(
+                "events.subscribe needs a `callbackBase` the server can reach this inspector at"
+                    .to_owned(),
+            )
+        })?;
+    let ttl_ms = TtlRequest::from_field(params.get("ttlMs"))
+        .map_err(|message| OpError::Params(format!("events.subscribe: `ttlMs`: {message}")))?;
+    let hook = hooks.mint(
+        directory,
+        ctx.target,
+        base,
+        name,
+        &arguments,
+        ctx.wire.cloned(),
+    );
+    let request = SubscribeEventsParams {
+        name: name.to_owned(),
+        arguments,
+        delivery: WebhookDelivery {
+            mode: DeliveryMode::Webhook.as_str().to_owned(),
+            url: hook.url.clone(),
+            secret: hook.secret.clone(),
+        },
+        cursor: params
+            .get("cursor")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        max_age_ms: None,
+        ttl_ms,
+        meta: None,
+    };
+    match session.subscribe_events(&request).await {
+        Ok(result) => Ok(json!({
+            "result": result,
+            "hook": { "sid": hook.sid, "url": hook.url },
+        })),
+        Err(error) => {
+            hooks.remove(&hook.sid);
+            Err(OpError::Client(error))
+        }
+    }
+}
+
+/// `events.unsubscribe`: end the subscription `sid` named, upstream and
+/// then here. A refused unsubscribe keeps the callback, since the server
+/// still delivers to it.
+async fn unsubscribe(
+    ctx: &OpContext<'_>,
+    session: &Session,
+    params: &Value,
+) -> Result<Value, OpError> {
+    let (hooks, _) = ctx.hooks.ok_or_else(|| {
+        OpError::Params("events.unsubscribe needs a registered target".to_owned())
+    })?;
+    let sid = params.get("sid").and_then(Value::as_str).ok_or_else(|| {
+        OpError::Params("events.unsubscribe needs the `sid` subscribe returned".to_owned())
+    })?;
+    let (name, arguments, url) = hooks
+        .subscription(sid)
+        .ok_or_else(|| OpError::Params(format!("no subscription `{sid}` here")))?;
+    let request = UnsubscribeEventsParams {
+        name,
+        arguments,
+        delivery: UnsubscribeDelivery {
+            mode: Some(DeliveryMode::Webhook.as_str().to_owned()),
+            url,
+        },
+        meta: None,
+    };
+    call(session.unsubscribe_events(&request).await)?;
+    hooks.remove(sid);
+    Ok(json!({ "unsubscribed": sid }))
+}
+
+/// The `arguments` object of `params`.
+fn arguments_of(params: &Value) -> Result<Map<String, Value>, OpError> {
+    arguments_from(params.get("arguments")).map_err(|message| OpError::Params(message.to_owned()))
 }
 
 fn call<T: serde::Serialize>(result: Result<T, UpstreamError>) -> Result<Value, OpError> {

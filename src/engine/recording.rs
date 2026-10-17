@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::engine::eventlog::WireEvent;
+use mcpg_mcp_wire::v_2026_07_28::extensions::events::wire as events;
 
 /// The first line of a recording: what it is, and what it is of.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -160,6 +161,9 @@ fn entity_of(method: &str, body: &Value) -> Option<String> {
     let field = match method {
         "tools/call" | "prompts/get" => "name",
         "resources/read" => "uri",
+        events::METHOD_POLL_EVENTS
+        | events::METHOD_SUBSCRIBE_EVENTS
+        | events::METHOD_UNSUBSCRIBE_EVENTS => "name",
         _ => return None,
     };
     params.get(field)?.as_str().map(str::to_owned)
@@ -307,11 +311,61 @@ impl McpUpstream for RecordedUpstream {
         Ok(Box::pin(futures::stream::empty()))
     }
 
+    async fn list_events(&self) -> Result<Vec<events::EventDescriptor>, UpstreamError> {
+        let page: events::ListEventsResult =
+            recorded_as(self.recording.answer(events::METHOD_LIST_EVENTS, None)?)?;
+        Ok(page.events)
+    }
+
+    async fn poll_events(
+        &self,
+        params: &events::PollEventsParams,
+    ) -> Result<events::PollEventsResult, UpstreamError> {
+        recorded_as(
+            self.recording
+                .answer(events::METHOD_POLL_EVENTS, Some(&params.name))?,
+        )
+    }
+
+    async fn open_event_stream(
+        &self,
+        _params: &events::StreamEventsParams,
+    ) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = Value> + Send>>, UpstreamError> {
+        // What a stream carried is in the frame log, as for subscriptions.
+        Ok(Box::pin(futures::stream::empty()))
+    }
+
+    async fn subscribe_events(
+        &self,
+        params: &events::SubscribeEventsParams,
+    ) -> Result<events::SubscribeEventsResult, UpstreamError> {
+        recorded_as(
+            self.recording
+                .answer(events::METHOD_SUBSCRIBE_EVENTS, Some(&params.name))?,
+        )
+    }
+
+    async fn unsubscribe_events(
+        &self,
+        params: &events::UnsubscribeEventsParams,
+    ) -> Result<events::UnsubscribeEventsResult, UpstreamError> {
+        recorded_as(
+            self.recording
+                .answer(events::METHOD_UNSUBSCRIBE_EVENTS, Some(&params.name))?,
+        )
+    }
+
     fn wire_is_modern(&self) -> bool {
         self.recording.header.negotiated_version.as_deref() == Some("2026-07-28")
     }
 
     async fn close(&self) {}
+}
+
+/// A recorded result read as the type the method answers with.
+fn recorded_as<T: serde::de::DeserializeOwned>(result: Value) -> Result<T, UpstreamError> {
+    serde_json::from_value(result)
+        .map_err(|e| UpstreamError::Protocol(format!("recorded result: {e}")))
 }
 
 #[cfg(test)]

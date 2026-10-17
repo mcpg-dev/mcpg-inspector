@@ -1,6 +1,12 @@
 import { useState } from 'react';
 import { useMutation } from '@tanstack/react-query';
-import { api, type AuthReport, type CheckReport, type GatewayReport } from '@/lib/api';
+import {
+  api,
+  type AuthReport,
+  type CheckReport,
+  type CheckResult,
+  type GatewayReport,
+} from '@/lib/api';
 import { Empty, Json } from '@/components/EntityPane';
 
 type Tab = 'auth' | 'checks' | 'gateway';
@@ -243,28 +249,35 @@ function ChecksView({
         </span>{' '}
         <span className="text-muted-foreground">· {report.protocol_version}</span>
       </p>
-      <ul className="space-y-2">
-        {report.checks.map((check) => (
-          <li key={check.id} data-testid="check-result">
-            <span
-              className={
-                check.outcome === 'pass'
-                  ? 'text-emerald-600'
-                  : check.outcome === 'fail'
-                    ? 'text-destructive'
-                    : 'text-muted-foreground'
-              }
-            >
-              {check.outcome}
-            </span>{' '}
-            <span className="font-mono">{check.id}</span>
-            <div>{check.description}</div>
-            {/* A skipped check is not a passing one: the wire this target
-                negotiated has nothing for it to assert. */}
-            {check.detail && <div className="text-muted-foreground">{check.detail}</div>}
-          </li>
-        ))}
-      </ul>
+      <CheckList checks={report.checks} />
     </div>
+  );
+}
+
+/** Check results, the failed ones as visible as the passed. */
+export function CheckList({ checks }: { checks: CheckResult[] }) {
+  return (
+    <ul className="space-y-2">
+      {checks.map((check) => (
+        <li key={check.id} data-testid="check-result">
+          <span
+            className={
+              check.outcome === 'pass'
+                ? 'text-emerald-600'
+                : check.outcome === 'fail'
+                  ? 'text-destructive'
+                  : 'text-muted-foreground'
+            }
+          >
+            {check.outcome}
+          </span>{' '}
+          <span className="font-mono">{check.id}</span>
+          <div>{check.description}</div>
+          {/* A skipped check is not a passing one: the wire this target
+              negotiated has nothing for it to assert. */}
+          {check.detail && <div className="text-muted-foreground">{check.detail}</div>}
+        </li>
+      ))}
+    </ul>
   );
 }

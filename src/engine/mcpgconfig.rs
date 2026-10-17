@@ -203,14 +203,17 @@ pub fn generate(
         upstream.insert("upstream_safety".into(), serde_json::Value::Object(safety));
     }
 
-    // Deliberately no `governance` override. Imported capabilities inherit
-    // the gateway's default trust floor, which is the safe answer — but it
-    // also means an operator who pastes this and then tests anonymously
-    // sees an empty tool list and concludes the federation failed. Saying
-    // so is the difference between config that works and config that looks
-    // broken.
+    // Deliberately no `governance` override. A federation without one gives
+    // its capabilities a `header_asserted` floor whatever the gateway's
+    // `default_minimum_trust` is, which is the safe answer — but it also
+    // means an operator who pastes this and then tests anonymously sees an
+    // empty tool list and concludes the federation failed. Saying so is the
+    // difference between config that works and config that looks broken.
     todo.push(
-        "imported capabilities inherit this gateway's default trust floor, so an          anonymous caller may see none of them; set `governance.minimum_trust` on the          federation only if that is what you mean"
+        "imported capabilities get this federation's own trust floor, `header_asserted` \
+         unless you set `governance.minimum_trust` on it (the gateway's \
+         `default_minimum_trust` does not apply), so an anonymous caller sees none of \
+         them; lower it on the federation only if that is what you mean"
             .to_owned(),
     );
 
@@ -260,11 +263,24 @@ mod tests {
         assert_eq!(out.auth_plan, AuthPlan::None);
         assert!(out.yaml.contains("mode: none"), "{}", out.yaml);
         assert!(out.yaml.contains("2026-07-28"), "{}", out.yaml);
+        let note = out
+            .todo
+            .iter()
+            .find(|t| t.contains("trust floor"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "even an open server carries the trust-floor note: {:?}",
+                    out.todo
+                )
+            });
+        // A federation without `governance` is `header_asserted`, not the
+        // gateway's default floor.
+        assert!(note.contains("`header_asserted`"), "{note}");
         assert!(
-            out.todo.iter().any(|t| t.contains("trust floor")),
-            "even an open server carries the trust-floor note: {:?}",
-            out.todo
+            note.contains("`default_minimum_trust` does not apply"),
+            "{note}"
         );
+        assert!(!note.contains("  "), "no runs of spaces: {note}");
     }
 
     /// A discovered authorization server is the whole point: the audience,
