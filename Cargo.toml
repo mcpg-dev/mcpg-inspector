@@ -1,6 +1,6 @@
 [package]
 name = "mcpg-inspector"
-version = "0.1.0-beta.49"
+version = "0.1.0-beta.50"
 edition = "2024"
 license = "Apache-2.0"
 description = "MCP inspector for mcpg — web UI, TUI and scriptable CLI in one binary"
@@ -33,7 +33,7 @@ futures = "0.3"
 # private_key_jwt client assertions and DPoP proofs. aws_lc_rs is the
 # backend the other in-tree JWT users pin; use_pem enables the PEM loaders.
 jsonwebtoken = { version = "11.1", default-features = false, features = ["aws_lc_rs", "use_pem"] }
-mcpg-mcp-client = { git = "https://github.com/mcpg-dev/mcpg-mcp-client", tag = "v0.1.0-beta.46", version = "=0.1.0-beta.46" }
+mcpg-mcp-client = { git = "https://github.com/mcpg-dev/mcpg-mcp-client", tag = "v0.1.0-beta.47", version = "=0.1.0-beta.47" }
 mcpg-mcp-wire = { git = "https://github.com/mcpg-dev/mcpg-mcp-wire", tag = "v0.1.0-beta.42", version = "=0.1.0-beta.42" }
 # Verifies the MCP Events deliveries a server sends to the inspector's
 # callbacks.
@@ -43,7 +43,7 @@ serde = { version = "1", features = ["derive"] }
 sha2 = "0.11"
 serde_yaml = "0.9"
 mcpg-sensitive = { git = "https://github.com/mcpg-dev/mcpg-sensitive", tag = "v0.1.0-beta.42", version = "=0.1.0-beta.42" }
-mcpg-plugin-protocol = { git = "https://github.com/mcpg-dev/mcpg-plugin-protocol", tag = "v0.1.0-beta.45", version = "=0.1.0-beta.45" }
+mcpg-plugin-protocol = { git = "https://github.com/mcpg-dev/mcpg-plugin-protocol", tag = "v0.1.0-beta.46", version = "=0.1.0-beta.46" }
 mcpg-aauth-core = { git = "https://github.com/mcpg-dev/mcpg-aauth-core", tag = "v0.1.0-beta.42", version = "=0.1.0-beta.42" }
 mcpg-cli-core = { git = "https://github.com/mcpg-dev/mcpg-cli-core", tag = "v0.1.0-beta.42", version = "=0.1.0-beta.42", default-features = false, features = ["oidc"] }
 url = "2"
