@@ -1,6 +1,6 @@
 [package]
 name = "mcpg-inspector"
-version = "0.1.0-beta.50"
+version = "0.1.0-beta.51"
 edition = "2024"
 license = "Apache-2.0"
 description = "MCP inspector for mcpg — web UI, TUI and scriptable CLI in one binary"
@@ -33,7 +33,7 @@ futures = "0.3"
 # private_key_jwt client assertions and DPoP proofs. aws_lc_rs is the
 # backend the other in-tree JWT users pin; use_pem enables the PEM loaders.
 jsonwebtoken = { version = "11.1", default-features = false, features = ["aws_lc_rs", "use_pem"] }
-mcpg-mcp-client = { git = "https://github.com/mcpg-dev/mcpg-mcp-client", tag = "v0.1.0-beta.47", version = "=0.1.0-beta.47" }
+mcpg-mcp-client = { git = "https://github.com/mcpg-dev/mcpg-mcp-client", tag = "v0.1.0-beta.48", version = "=0.1.0-beta.48" }
 mcpg-mcp-wire = { git = "https://github.com/mcpg-dev/mcpg-mcp-wire", tag = "v0.1.0-beta.42", version = "=0.1.0-beta.42" }
 # Verifies the MCP Events deliveries a server sends to the inspector's
 # callbacks.
