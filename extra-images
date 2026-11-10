@@ -1,4 +1,0 @@
-# Variant images from this repo's Dockerfile: <build target>=<package name>.
-# The tui crate is a library; its runnable image ships from here, where the
-# standalone binary lives beside the engine it needs.
-tui=mcpg-inspector-tui
