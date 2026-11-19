@@ -13,6 +13,7 @@ use mcpg_mcp_client::auth::{
     BearerChallenge, DiscoveredOauth, DiscoveryPolicy, DiscoveryStep, IdJagSupport,
     discover_oauth_traced,
 };
+use mcpg_mcp_wire::v_2026_07_28::wire::SUPPORTED_PROTOCOL_VERSION;
 use serde::Serialize;
 
 use super::target::{TargetKind, TargetSpec};
@@ -185,11 +186,23 @@ pub async fn inspect(spec: &TargetSpec) -> Result<AuthReport, String> {
         std::time::Duration::from_secs(10),
     )
     .await?;
+    // A complete 2026-07-28 request, so an open server answers it rather
+    // than refusing a request that names no protocol version.
     let resp = client
         .post(url)
         .header("content-type", "application/json")
         .header("accept", "application/json, text/event-stream")
-        .body(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#)
+        .header("mcp-protocol-version", SUPPORTED_PROTOCOL_VERSION)
+        .header("mcp-method", "tools/list")
+        .body(
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/list",
+                "params": { "_meta": super::request_meta("mcpg-inspector-auth") },
+            })
+            .to_string(),
+        )
         .send()
         .await
         .map_err(|e| format!("probe request to {url} failed: {e}"))?;

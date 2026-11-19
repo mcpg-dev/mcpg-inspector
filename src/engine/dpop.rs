@@ -208,9 +208,15 @@ impl DpopSigner {
 
     /// Ask the resource at `url` for a nonce: a request whose proof carries
     /// none is answered 401 `use_dpop_nonce` with a fresh `DPoP-Nonce` by a
-    /// resource that requires one (RFC 9449 §9). Returns whether one was
-    /// learned.
+    /// resource that requires one (RFC 9449 §9). The request is a read-only
+    /// `server/discover`, so a resource that needs no nonce has nothing to
+    /// act on. Returns whether one was learned.
     pub async fn learn_nonce(&self, client: &reqwest::Client, url: &str) -> bool {
+        use mcpg_mcp_wire::v_2026_07_28::wire::lifecycle::METHOD_SERVER_DISCOVER;
+        use mcpg_mcp_wire::v_2026_07_28::wire::{
+            METHOD_HEADER, PROTOCOL_VERSION_HEADER, SUPPORTED_PROTOCOL_VERSION,
+        };
+
         let Ok(headers) = self.headers("POST", url) else {
             return false;
         };
@@ -221,7 +227,17 @@ impl DpopSigner {
                 reqwest::header::ACCEPT,
                 "application/json, text/event-stream",
             )
-            .body(r#"{"jsonrpc":"2.0","id":0,"method":"ping"}"#);
+            .header(PROTOCOL_VERSION_HEADER, SUPPORTED_PROTOCOL_VERSION)
+            .header(METHOD_HEADER, METHOD_SERVER_DISCOVER)
+            .body(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 0,
+                    "method": METHOD_SERVER_DISCOVER,
+                    "params": { "protocolVersion": SUPPORTED_PROTOCOL_VERSION },
+                })
+                .to_string(),
+            );
         for (name, value) in headers {
             request = request.header(name, value);
         }

@@ -1,12 +1,11 @@
 //! Turning what the inspector learned into mcpg configuration.
 //!
 //! Inspecting a server answers questions an operator then has to re-answer
-//! by hand: which wire it speaks, whether it wants a bearer, where its
-//! authorization server is, what audience a token needs. All of that is
-//! already in the auth lab's report and the connect probe's verdict, so
-//! emitting the federation block is a formatting job rather than a research
-//! one — and getting it wrong by hand is easy in exactly the places the
-//! inspector already checked.
+//! by hand: whether it wants a bearer, where its authorization server is,
+//! what audience a token needs. All of that is already in the auth lab's
+//! report, so emitting the federation block is a formatting job rather than
+//! a research one — and getting it wrong by hand is easy in exactly the
+//! places the inspector already checked.
 //!
 //! What comes out is a `federations:` entry to paste into `server.yml`. Once
 //! it is there, the gateway is the thing that holds the credential and
@@ -106,11 +105,7 @@ fn plan(report: &AuthReport) -> AuthPlan {
 }
 
 /// Build the federation block for a target the inspector has probed.
-pub fn generate(
-    spec: &TargetSpec,
-    report: &AuthReport,
-    negotiated_version: &str,
-) -> Result<GeneratedConfig, String> {
+pub fn generate(spec: &TargetSpec, report: &AuthReport) -> Result<GeneratedConfig, String> {
     let TargetKind::Http { url } = &spec.kind else {
         return Err(
             "a stdio target runs a local process; federate it by putting the same \
@@ -174,19 +169,6 @@ pub fn generate(
 
     let mut upstream = serde_json::Map::new();
     upstream.insert("url".into(), url.clone().into());
-    // The wire is the probe's verdict, not a guess: pinning it means the
-    // gateway skips its own probe and cannot land on a different answer.
-    upstream.insert(
-        "protocol_version".into(),
-        // The serde names are the dated revisions themselves, not the Rust
-        // variant spellings — a config written with the latter parses
-        // nowhere.
-        match negotiated_version {
-            "2026-07-28" => "2026-07-28",
-            _ => "2025-11-25",
-        }
-        .into(),
-    );
     upstream.insert("auth".into(), auth);
     if !spec.headers.is_empty() {
         upstream.insert(
@@ -254,15 +236,9 @@ mod tests {
 
     #[test]
     fn an_open_server_needs_no_auth_block() {
-        let out = generate(
-            &spec("https://api.example.com/mcp"),
-            &report(),
-            "2026-07-28",
-        )
-        .unwrap();
+        let out = generate(&spec("https://api.example.com/mcp"), &report()).unwrap();
         assert_eq!(out.auth_plan, AuthPlan::None);
         assert!(out.yaml.contains("mode: none"), "{}", out.yaml);
-        assert!(out.yaml.contains("2026-07-28"), "{}", out.yaml);
         let note = out
             .todo
             .iter()
@@ -283,6 +259,26 @@ mod tests {
         assert!(!note.contains("  "), "no runs of spaces: {note}");
     }
 
+    /// The gateway refuses an unknown key at boot, so the upstream block
+    /// names only keys its federation config reads.
+    #[test]
+    fn the_upstream_block_uses_only_keys_the_gateway_reads() {
+        let mut s = spec("http://127.0.0.1:8787/mcp");
+        s.headers.insert("x-env".into(), "staging".into());
+        let out = generate(&s, &report()).unwrap();
+        let doc: serde_json::Value = serde_yaml::from_str(&out.yaml).unwrap();
+        let upstream = doc["mcp"]["federations"][0]["upstream"]
+            .as_object()
+            .expect("an upstream block");
+        for key in upstream.keys() {
+            assert!(
+                matches!(key.as_str(), "url" | "auth" | "headers" | "upstream_safety"),
+                "unexpected upstream key `{key}`: {}",
+                out.yaml
+            );
+        }
+    }
+
     /// A discovered authorization server is the whole point: the audience,
     /// resource and token endpoint go straight into the credential config
     /// the issuer plugin consumes.
@@ -296,7 +292,7 @@ mod tests {
             scope: Some("mcp:read".to_owned()),
             ..Default::default()
         });
-        let out = generate(&spec("https://api.example.com/mcp"), &r, "2025-11-25").unwrap();
+        let out = generate(&spec("https://api.example.com/mcp"), &r).unwrap();
         assert_eq!(out.auth_plan, AuthPlan::OauthClientCredentials);
         assert!(
             out.yaml.contains("mode: oauth_client_credentials"),
@@ -315,7 +311,6 @@ mod tests {
             out.yaml
         );
         assert!(out.yaml.contains("scope: mcp:read"), "{}", out.yaml);
-        assert!(out.yaml.contains("2025-11-25"), "{}", out.yaml);
         // The issuer is the operator's choice; a plausible-looking invented
         // id would produce config that reads as finished and does not boot.
         assert!(out.yaml.contains("CHANGEME"), "{}", out.yaml);
@@ -329,7 +324,7 @@ mod tests {
         let mut r = report();
         r.probe_status = 401;
         r.challenge = Some(BearerChallenge::default());
-        let out = generate(&spec("https://api.example.com/mcp"), &r, "2026-07-28").unwrap();
+        let out = generate(&spec("https://api.example.com/mcp"), &r).unwrap();
         assert_eq!(out.auth_plan, AuthPlan::PassThrough);
         assert!(out.yaml.contains("mode: pass_through"), "{}", out.yaml);
         assert!(
@@ -348,7 +343,7 @@ mod tests {
             resource_metadata: true,
             ..Default::default()
         });
-        let out = generate(&spec("https://api.example.com/mcp"), &r, "2026-07-28").unwrap();
+        let out = generate(&spec("https://api.example.com/mcp"), &r).unwrap();
         assert_eq!(out.auth_plan, AuthPlan::Aauth);
         assert!(out.yaml.contains("mode: none"), "{}", out.yaml);
         assert!(
@@ -364,7 +359,7 @@ mod tests {
     /// config is refused by the very gateway it was written for.
     #[test]
     fn a_loopback_http_target_carries_its_safety_opt_ins() {
-        let out = generate(&spec("http://127.0.0.1:8787/mcp"), &report(), "2026-07-28").unwrap();
+        let out = generate(&spec("http://127.0.0.1:8787/mcp"), &report()).unwrap();
         assert!(
             out.yaml.contains("allow_private_backends: true"),
             "{}",
@@ -392,7 +387,7 @@ mod tests {
     fn a_stdio_target_is_refused_with_the_reason() {
         let spec: TargetSpec =
             serde_json::from_value(serde_json::json!({"command": "sh", "args": []})).unwrap();
-        let err = generate(&spec, &report(), "2025-11-25").unwrap_err();
+        let err = generate(&spec, &report()).unwrap_err();
         assert!(err.contains("upstream.command"), "{err}");
     }
 
@@ -402,7 +397,7 @@ mod tests {
     fn headers_are_carried_with_a_warning() {
         let mut s = spec("https://api.example.com/mcp");
         s.headers.insert("x-api-key".into(), "secret".into());
-        let out = generate(&s, &report(), "2026-07-28").unwrap();
+        let out = generate(&s, &report()).unwrap();
         assert!(out.yaml.contains("x-api-key"), "{}", out.yaml);
         assert!(
             out.todo.iter().any(|t| t.contains("${env.NAME}")),

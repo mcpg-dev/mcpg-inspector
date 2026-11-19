@@ -60,8 +60,8 @@ impl TargetEntry {
     }
 
     /// Connect (or re-connect) this target, installing its event log as
-    /// the frame tap so the whole conversation — including the version
-    /// probe — is recorded from the first byte.
+    /// the frame tap so the whole conversation — including the connect's
+    /// `server/discover` — is recorded from the first byte.
     pub async fn connect(&self) -> Result<SessionState, SessionError> {
         let mut slot = self.session.lock().await;
         if let Some(existing) = slot.take() {

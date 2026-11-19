@@ -98,8 +98,8 @@ pub struct ExecRequest {
 #[serde(rename_all = "camelCase")]
 pub struct ExecResponse {
     pub result: Value,
-    /// The wire the probe settled on, so the caller can show it without a
-    /// second round trip.
+    /// The protocol revision the exchange spoke, so the caller can show it
+    /// without a second round trip.
     pub negotiated_version: &'static str,
     /// Every frame of this exchange, in order. The caller accumulates them;
     /// the server keeps none.

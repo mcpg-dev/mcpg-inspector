@@ -9,21 +9,6 @@ use serde::{Deserialize, Serialize};
 /// loop-detection id on every request.
 const INSPECTOR_VIA: &str = "mcpg-inspector";
 
-/// Protocol-version policy for one target. `Auto` runs the SEP-2575
-/// probe; the pins force a wire.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
-#[serde(rename_all = "kebab-case")]
-pub enum VersionPolicy {
-    #[default]
-    Auto,
-    #[value(name = "2025-11-25")]
-    #[serde(rename = "2025-11-25")]
-    Sessionful,
-    #[value(name = "2026-07-28")]
-    #[serde(rename = "2026-07-28")]
-    Stateless,
-}
-
 /// One inspectable MCP server. Unknown JSON keys pass silently: the
 /// flattened kind precludes `deny_unknown_fields` (a serde
 /// limitation), and target objects travel between inspector versions.
@@ -39,8 +24,6 @@ pub struct TargetSpec {
     pub bearer: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub headers: BTreeMap<String, String>,
-    #[serde(default)]
-    pub protocol_version: VersionPolicy,
     /// How server→client requests (sampling / elicitation / roots) are
     /// answered for this target.
     #[serde(default)]
@@ -143,7 +126,6 @@ impl TargetSpec {
             kind,
             bearer: None,
             headers: BTreeMap::new(),
-            protocol_version: VersionPolicy::Auto,
             responder: crate::engine::responders::ResponderPolicy::default(),
             allow_private: default_allow_private(),
             timeout_ms: default_timeout_ms(),
@@ -176,9 +158,7 @@ impl TargetSpec {
         )))
     }
 
-    /// Lower the spec into client connect options. stdio speaks only the
-    /// sessionful wire (the client probes HTTP targets only), so a
-    /// stateless pin on stdio is rejected rather than silently ignored.
+    /// Lower the spec into client connect options.
     pub fn connect_options(
         &self,
         tap: Option<mcpg_mcp_client::tap::SharedTap>,
@@ -197,26 +177,13 @@ impl TargetSpec {
                 Vec::new(),
                 BTreeMap::new(),
             ),
-            TargetKind::Stdio { command, args, env } => {
-                if self.protocol_version == VersionPolicy::Stateless {
-                    return Err("stdio targets speak the sessionful wire only; \
-                         drop the 2026-07-28 pin"
-                        .to_owned());
-                }
-                (
-                    UpstreamTransport::Stdio,
-                    String::new(),
-                    Some(command.clone()),
-                    args.clone(),
-                    env.clone(),
-                )
-            }
-        };
-        let (modern, probe) = match (&self.kind, self.protocol_version) {
-            (TargetKind::Stdio { .. }, _) => (false, false),
-            (_, VersionPolicy::Auto) => (false, true),
-            (_, VersionPolicy::Sessionful) => (false, false),
-            (_, VersionPolicy::Stateless) => (true, false),
+            TargetKind::Stdio { command, args, env } => (
+                UpstreamTransport::Stdio,
+                String::new(),
+                Some(command.clone()),
+                args.clone(),
+                env.clone(),
+            ),
         };
         let capture_stdio_stderr = tap.is_some();
         let dpop: Option<mcpg_mcp_client::signer::SharedSigner> = self
@@ -237,9 +204,8 @@ impl TargetSpec {
             timeout: Duration::from_millis(self.timeout_ms),
             gateway_via: INSPECTOR_VIA.to_owned(),
             client_capabilities: serde_json::json!({}),
+            discover: true,
             transport,
-            modern,
-            probe,
             headers: self.headers.clone(),
             command,
             args,
@@ -274,20 +240,12 @@ mod tests {
             other => panic!("expected stdio, got {other:?}"),
         }
 
-        let t = TargetSpec::parse_cli(
-            r#"{"url":"http://127.0.0.1:8787/mcp","protocol_version":"2026-07-28"}"#,
-        )
-        .unwrap();
-        assert_eq!(t.protocol_version, VersionPolicy::Stateless);
+        let t = TargetSpec::parse_cli(r#"{"url":"http://127.0.0.1:8787/mcp","timeout_ms":5000}"#)
+            .unwrap();
+        assert!(matches!(t.kind, TargetKind::Http { .. }));
+        assert_eq!(t.timeout_ms, 5000);
 
         assert!(TargetSpec::parse_cli("ftp://nope").is_err());
-    }
-
-    #[test]
-    fn stdio_rejects_stateless_pin() {
-        let mut t = TargetSpec::parse_cli("stdio:server").unwrap();
-        t.protocol_version = VersionPolicy::Stateless;
-        assert!(t.connect_options(None).is_err());
     }
 
     /// A DPoP key moves the token from the Bearer header into the signer,
@@ -332,15 +290,23 @@ mod tests {
     }
 
     #[test]
-    fn auto_probes_http_but_not_stdio() {
+    fn each_kind_lowers_to_its_own_transport() {
         let t = TargetSpec::parse_cli("https://example.com/mcp").unwrap();
         let o = t.connect_options(None).unwrap();
-        assert!(o.probe);
-        assert!(!o.modern);
+        assert!(matches!(o.transport, UpstreamTransport::StreamableHttp));
+        assert_eq!(o.url, "https://example.com/mcp");
+        assert!(o.command.is_none());
 
-        let t = TargetSpec::parse_cli("stdio:server").unwrap();
+        let t = TargetSpec::parse_cli("stdio:server --flag").unwrap();
         let o = t.connect_options(None).unwrap();
-        assert!(!o.probe);
-        assert!(!o.modern);
+        assert!(matches!(o.transport, UpstreamTransport::Stdio));
+        assert_eq!(o.command.as_deref(), Some("server"));
+        assert_eq!(o.args, ["--flag"]);
+
+        let t = TargetSpec::parse_cli("recording:/tmp/r.jsonl").unwrap();
+        assert!(
+            t.connect_options(None).is_err(),
+            "a recording is never dialled"
+        );
     }
 }

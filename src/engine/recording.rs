@@ -11,9 +11,7 @@
 
 use std::collections::HashMap;
 
-use mcpg_mcp_client::upstream::{
-    McpUpstream, SubscriptionSpec, UpstreamError, UpstreamServerRequestHandler,
-};
+use mcpg_mcp_client::upstream::{McpUpstream, SubscriptionSpec, ToolCallOptions, UpstreamError};
 use mcpg_mcp_client::wire::{
     UpstreamPrompt, UpstreamResource, UpstreamResourceTemplate, UpstreamTool,
 };
@@ -248,43 +246,15 @@ impl McpUpstream for RecordedUpstream {
         self.recording.answer("prompts/get", Some(name))
     }
 
-    async fn call_tool_with_meta(
+    async fn call_tool_with(
         &self,
         name: &str,
         _arguments: Option<&Value>,
-        _meta: Option<&Value>,
+        _options: &ToolCallOptions<'_>,
     ) -> Result<Value, UpstreamError> {
+        // A recorded exchange has already been answered; a resumed call gets
+        // the same recorded result as the first one.
         self.recording.answer("tools/call", Some(name))
-    }
-
-    async fn call_tool_bridged(
-        &self,
-        name: &str,
-        arguments: Option<&Value>,
-        _input_schema: Option<&Value>,
-        _handler: &dyn UpstreamServerRequestHandler,
-        _progress_token: Option<&Value>,
-    ) -> Result<Value, UpstreamError> {
-        // A recorded exchange has already been answered; there is nobody to
-        // ask again, so the bridge is a plain call.
-        self.call_tool_with_meta(name, arguments, None).await
-    }
-
-    async fn read_resource_bridged(
-        &self,
-        uri: &str,
-        _handler: &dyn UpstreamServerRequestHandler,
-    ) -> Result<Value, UpstreamError> {
-        self.read_resource(uri).await
-    }
-
-    async fn get_prompt_bridged(
-        &self,
-        name: &str,
-        arguments: Option<&Value>,
-        _handler: &dyn UpstreamServerRequestHandler,
-    ) -> Result<Value, UpstreamError> {
-        self.get_prompt(name, arguments).await
     }
 
     async fn complete(
@@ -294,12 +264,6 @@ impl McpUpstream for RecordedUpstream {
         _context: Option<&Value>,
     ) -> Result<Value, UpstreamError> {
         self.recording.answer("completion/complete", None)
-    }
-
-    async fn open_notifications(
-        &self,
-    ) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = Value> + Send>>, UpstreamError> {
-        Ok(Box::pin(futures::stream::empty()))
     }
 
     async fn open_subscriptions(
@@ -353,10 +317,6 @@ impl McpUpstream for RecordedUpstream {
             self.recording
                 .answer(events::METHOD_UNSUBSCRIBE_EVENTS, Some(&params.name))?,
         )
-    }
-
-    fn wire_is_modern(&self) -> bool {
-        self.recording.header.negotiated_version.as_deref() == Some("2026-07-28")
     }
 
     async fn close(&self) {}
@@ -425,12 +385,9 @@ mod tests {
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, "echo");
 
-        let called = upstream
-            .call_tool_with_meta("echo", None, None)
-            .await
-            .expect("call");
+        let called = upstream.call_tool("echo", None).await.expect("call");
         assert_eq!(called["content"][0]["text"], "hi");
-        assert!(upstream.wire_is_modern());
+        assert_eq!(upstream.negotiated_version(), Some("2026-07-28"));
     }
 
     /// The edge of a recording has to be visible. Inventing an answer that
@@ -438,9 +395,7 @@ mod tests {
     #[tokio::test]
     async fn what_was_not_recorded_says_so() {
         let upstream = RecordedUpstream::new(parse(&recorded()).expect("parse"));
-        let missing = upstream
-            .call_tool_with_meta("never.called", None, None)
-            .await;
+        let missing = upstream.call_tool("never.called", None).await;
         let message = format!("{}", missing.expect_err("should not invent an answer"));
         assert!(message.contains("no tools/call"), "{message}");
         assert!(message.contains("never.called"), "{message}");

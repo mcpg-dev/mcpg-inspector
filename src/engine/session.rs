@@ -6,14 +6,15 @@ use mcpg_mcp_client::wire::{
     UpstreamPrompt, UpstreamResource, UpstreamResourceTemplate, UpstreamTool,
 };
 use mcpg_mcp_wire::v_2026_07_28::extensions::events::wire as events;
+use mcpg_mcp_wire::v_2026_07_28::wire::SUPPORTED_PROTOCOL_VERSION;
 use serde_json::{Value, json};
 
-use super::responders::{BridgeHandler, MAX_MRTR_ROUNDS, Responder};
+use super::responders::{MAX_MRTR_ROUNDS, Responder};
 use super::target::TargetSpec;
 
-/// A connected target. Wraps the shared MCP client; the negotiated
-/// wire is captured at connect (the probe's verdict under
-/// `protocol_version: auto`).
+/// A connected target. Wraps the shared MCP client, whose connect has
+/// already checked through `server/discover` that the target serves
+/// this protocol revision.
 pub struct Session {
     upstream: Arc<dyn McpUpstream>,
     responder: Arc<Responder>,
@@ -84,7 +85,7 @@ impl Session {
         };
         // AAuth: obtain the person / auth token the spec asks for before the
         // first request — the consent-bearing modes may defer on the person
-        // server, and that wait belongs before the MCP session opens.
+        // server, and that wait belongs before the connect's `server/discover`.
         if let (Some(aauth), Some(url)) = (&spec.aauth, endpoint_url.as_deref()) {
             let signer = Arc::new(
                 crate::engine::aauth::AauthSigner::new(aauth).map_err(SessionError::Spec)?,
@@ -93,8 +94,8 @@ impl Session {
             opts.signer = Some(signer);
         }
         // DPoP: the signer is kept by type, so a resource that demands a
-        // server nonce (RFC 9449 §9) can be asked for one and the connect
-        // tried once more with it.
+        // server nonce (RFC 9449 §9) at the connect's `server/discover` can
+        // be asked for one and the connect tried once more with it.
         let dpop = match spec.dpop_signer().map_err(SessionError::Spec)? {
             Some(signer) => {
                 let signer = Arc::new(signer);
@@ -103,16 +104,6 @@ impl Session {
             }
             None => None,
         };
-        // A pinned stateless wire sends nothing at connect, so a nonce the
-        // resource demands is asked for up front rather than on a refusal.
-        if let (Some(signer), Some(url)) = (&dpop, &endpoint_url)
-            && opts.modern
-            && !opts.probe
-        {
-            signer
-                .learn_nonce(&nonce_client(spec, url).await?, url)
-                .await;
-        }
         let upstream = match (connect_upstream(opts.clone()).await, dpop, &endpoint_url) {
             (Ok(upstream), _, _) => upstream,
             (Err(UpstreamError::Http { status: 401, .. }), Some(signer), Some(url)) => {
@@ -146,13 +137,9 @@ impl Session {
         self.endpoint_url.as_deref()
     }
 
-    /// The wire string this session actually speaks.
+    /// The protocol revision this session speaks.
     pub fn negotiated_version(&self) -> &'static str {
-        if self.upstream.wire_is_modern() {
-            "2026-07-28"
-        } else {
-            "2025-11-25"
-        }
+        SUPPORTED_PROTOCOL_VERSION
     }
 
     pub async fn list_tools(&self) -> Result<Vec<UpstreamTool>, UpstreamError> {
@@ -176,55 +163,44 @@ impl Session {
     /// Call a tool, answering whatever the server asks for along the
     /// way.
     ///
-    /// The two wires suspend differently and both are handled here. On
-    /// the sessionful wire the server issues requests as frames on the
-    /// call's stream, so the call takes the client's bridged path with
-    /// the responder attached. On the stateless wire it returns
-    /// `resultType: "input_required"`, and the client must answer each
-    /// entry and REPLAY the call carrying `requestState` plus
-    /// `inputResponses` — the loop below, bounded so a server that
-    /// keeps suspending cannot pin the inspector forever.
+    /// A server that needs input returns `resultType: "input_required"`
+    /// (SEP-2322). The client answers each entry and replays the call
+    /// carrying `requestState` plus `inputResponses` — the loop in
+    /// [`Self::call_tool_mrtr`], bounded so a server that keeps
+    /// suspending cannot pin the inspector forever. A policy that
+    /// answers nothing hands the `input_required` result back as is.
     pub async fn call_tool(
         &self,
         name: &str,
         arguments: Option<&Value>,
     ) -> Result<Value, UpstreamError> {
-        if !self.responder.policy().bridges() {
+        if !self.responder.policy().answers_input_requests() {
             return self.upstream.call_tool(name, arguments).await;
-        }
-        if !self.upstream.wire_is_modern() {
-            let handler = BridgeHandler {
-                responder: Arc::clone(&self.responder),
-            };
-            return self
-                .upstream
-                .call_tool_bridged(name, arguments, None, &handler, None)
-                .await;
         }
         self.call_tool_mrtr(name, arguments).await
     }
 
-    /// The stateless-wire suspension loop (SEP-2322).
+    /// The suspension loop (SEP-2322).
     async fn call_tool_mrtr(
         &self,
         name: &str,
         arguments: Option<&Value>,
     ) -> Result<Value, UpstreamError> {
-        use mcpg_mcp_wire::v_2026_07_28::wire::mrtr::{
-            META_KEY_INPUT_RESPONSES, META_KEY_REQUEST_STATE, RESULT_TYPE_INPUT_REQUIRED,
-        };
+        use mcpg_mcp_wire::v_2026_07_28::wire::mrtr::RESULT_TYPE_INPUT_REQUIRED;
 
-        let arguments = arguments.cloned();
-        // Resumption metadata rides on `params._meta`, NOT inside the
-        // tool's arguments: a server reads `_meta` beside `name` and
-        // `arguments`, so answers tucked into the arguments object are
-        // never seen and the call suspends again forever.
-        let mut resume_meta: Option<Value> = None;
+        // The answers travel as top-level params beside `name` and
+        // `arguments`: tucked into the arguments object, a server never
+        // sees them and the call suspends again forever.
+        let mut resume: Option<(String, Value)> = None;
         for round in 0..MAX_MRTR_ROUNDS {
-            let result = self
-                .upstream
-                .call_tool_with_meta(name, arguments.as_ref(), resume_meta.as_ref())
-                .await?;
+            let result = match &resume {
+                None => self.upstream.call_tool(name, arguments).await?,
+                Some((request_state, input_responses)) => {
+                    self.upstream
+                        .call_tool_resuming(name, arguments, request_state, input_responses)
+                        .await?
+                }
+            };
             let suspended = result.get("resultType").and_then(Value::as_str)
                 == Some(RESULT_TYPE_INPUT_REQUIRED);
             if !suspended {
@@ -260,7 +236,7 @@ impl Session {
                     .unwrap_or_default()
                     .to_owned();
                 let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
-                let answer = self.responder.answer(&method, params, "mrtr").await;
+                let answer = self.responder.answer(&method, params).await;
                 answers.insert(
                     token.clone(),
                     match answer {
@@ -272,10 +248,7 @@ impl Session {
                 );
             }
 
-            resume_meta = Some(json!({
-                META_KEY_REQUEST_STATE: request_state,
-                META_KEY_INPUT_RESPONSES: Value::Object(answers),
-            }));
+            resume = Some((request_state, Value::Object(answers)));
 
             tracing::debug!(round = round + 1, tool = %name, "MRTR round");
         }

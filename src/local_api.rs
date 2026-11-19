@@ -211,17 +211,11 @@ impl InspectorApi for LocalApi {
         let url = session.endpoint_url().ok_or_else(|| {
             "the protocol checks probe an HTTP endpoint; a stdio target has none".to_owned()
         })?;
-        let report = crate::engine::checks::run(
-            url,
-            session.negotiated_version(),
-            self.entry(id)?.spec.allow_private,
-        )
-        .await?;
+        let report = crate::engine::checks::run(url, self.entry(id)?.spec.allow_private).await?;
         Ok(CheckSummary {
             protocol_version: report.protocol_version,
             passed: report.passed,
             failed: report.failed,
-            skipped: report.skipped,
             checks: report
                 .checks
                 .into_iter()
@@ -231,7 +225,6 @@ impl InspectorApi for LocalApi {
                     outcome: match check.outcome {
                         crate::engine::checks::Outcome::Pass => Outcome::Pass,
                         crate::engine::checks::Outcome::Fail => Outcome::Fail,
-                        crate::engine::checks::Outcome::Skip => Outcome::Skip,
                     },
                     detail: check.detail,
                 })
@@ -286,7 +279,6 @@ impl InspectorApi for LocalApi {
                 id: request.id,
                 method: request.method,
                 params: serde_json::to_string_pretty(&request.params).unwrap_or_default(),
-                regime: request.regime.to_owned(),
             })
             .collect()
     }

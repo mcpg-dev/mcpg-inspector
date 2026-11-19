@@ -234,8 +234,8 @@ function ChecksView({
   if (!state.data) {
     return (
       <Empty>
-        Runs the portable checks any conformant server should pass, against the wire this
-        target actually negotiated.
+        Runs the portable checks any conformant server should pass, against this target's
+        HTTP endpoint.
       </Empty>
     );
   }
@@ -245,7 +245,6 @@ function ChecksView({
       <p>
         <span data-testid="checks-summary">
           {report.passed} passed, {report.failed} failed
-          {report.skipped > 0 && `, ${report.skipped} skipped`}
         </span>{' '}
         <span className="text-muted-foreground">· {report.protocol_version}</span>
       </p>
@@ -260,21 +259,11 @@ export function CheckList({ checks }: { checks: CheckResult[] }) {
     <ul className="space-y-2">
       {checks.map((check) => (
         <li key={check.id} data-testid="check-result">
-          <span
-            className={
-              check.outcome === 'pass'
-                ? 'text-emerald-600'
-                : check.outcome === 'fail'
-                  ? 'text-destructive'
-                  : 'text-muted-foreground'
-            }
-          >
+          <span className={check.outcome === 'pass' ? 'text-emerald-600' : 'text-destructive'}>
             {check.outcome}
           </span>{' '}
           <span className="font-mono">{check.id}</span>
           <div>{check.description}</div>
-          {/* A skipped check is not a passing one: the wire this target
-              negotiated has nothing for it to assert. */}
           {check.detail && <div className="text-muted-foreground">{check.detail}</div>}
         </li>
       ))}

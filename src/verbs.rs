@@ -18,7 +18,7 @@ use crate::engine::ops::{self, Op, OpContext, OpError};
 use crate::engine::responders::{MockAnswers, ResponderPolicy, Root};
 use crate::engine::session::{Session, SessionError};
 use crate::engine::snapshot::DiffMode;
-use crate::engine::target::{TargetSpec, VersionPolicy};
+use crate::engine::target::TargetSpec;
 
 #[derive(clap::Args, Debug)]
 pub struct TargetArgs {
@@ -41,9 +41,6 @@ pub struct TargetArgs {
     /// Extra request header, NAME=VALUE (repeatable)
     #[arg(long = "header", value_name = "NAME=VALUE")]
     pub headers: Vec<String>,
-    /// Wire selection: probe (auto) or pin a revision
-    #[arg(long, value_enum, default_value_t = VersionPolicy::Auto)]
-    pub protocol_version: VersionPolicy,
     /// Refuse targets that resolve to private/loopback addresses
     #[arg(long)]
     pub no_private: bool,
@@ -429,10 +426,9 @@ pub fn run_prompt(args: PromptArgs) -> ! {
 
 /// Emit the mcpg federation config for a target.
 ///
-/// Connect once for the wire, probe once for the authorization posture, and
-/// render the block. Everything it fills in is something an operator would
-/// otherwise look up by hand, in exactly the places the inspector has just
-/// checked.
+/// Probe once for the authorization posture and render the block. Everything
+/// it fills in is something an operator would otherwise look up by hand, in
+/// exactly the places the inspector has just checked.
 pub fn run_config(args: ConfigArgs) -> ! {
     let json_out = args.target.json;
     let spec = match build_spec(&args.target) {
@@ -448,22 +444,7 @@ pub fn run_config(args: ConfigArgs) -> ! {
             Ok(r) => r,
             Err(message) => return fail_code(EXIT_CONNECT, "connect", &message, json_out),
         };
-        // Connect for the probe's verdict, so the emitted wire is the one
-        // this server actually speaks. A server that refuses an anonymous
-        // connect still gets a config; it falls back to the sessionful wire,
-        // which is what an unprobed gateway would assume anyway.
-        let responder = Arc::new(crate::engine::responders::Responder::new(
-            ResponderPolicy::AutoDecline,
-        ));
-        let negotiated = match Session::connect(&spec, None, responder, None).await {
-            Ok(session) => {
-                let v = session.negotiated_version();
-                session.close().await;
-                v
-            }
-            Err(_) => "2025-11-25",
-        };
-        match crate::engine::mcpgconfig::generate(&spec, &report, negotiated) {
+        match crate::engine::mcpgconfig::generate(&spec, &report) {
             Ok(generated) => {
                 if json_out {
                     println!(
@@ -930,7 +911,7 @@ pub fn run_check(args: CheckArgs) -> ! {
                 )
             })?
             .to_owned();
-        let report = crate::engine::checks::run(&url, session.negotiated_version(), allow_private)
+        let report = crate::engine::checks::run(&url, allow_private)
             .await
             .map_err(UpstreamError::Protocol)?;
         let failed = report.failed;
@@ -1015,7 +996,7 @@ where
             }
         };
         eprintln!(
-            "connected: negotiated protocol version {}",
+            "connected: protocol version {}",
             session.negotiated_version()
         );
         let outcome = op(Arc::clone(&session)).await;
@@ -1046,10 +1027,6 @@ fn build_spec(args: &TargetArgs) -> Result<TargetSpec, String> {
             .split_once('=')
             .ok_or_else(|| format!("--header '{header}' is not NAME=VALUE"))?;
         spec.headers.insert(name.to_owned(), value.to_owned());
-    }
-    // A pin given on the command line beats the spec's own (JSON form).
-    if args.protocol_version != VersionPolicy::Auto {
-        spec.protocol_version = args.protocol_version;
     }
     if args.no_private {
         spec.allow_private = false;

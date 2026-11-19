@@ -39,12 +39,10 @@ pub struct Entry {
     pub mime_type: Option<String>,
 }
 
-/// What a server advertised, at one moment, over one wire.
+/// What a server advertised, at one moment.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Snapshot {
-    /// The wire this snapshot was taken over. A capability set can
-    /// legitimately differ between wires, so a diff says so rather
-    /// than blaming the server.
+    /// The protocol revision this snapshot was taken over.
     pub protocol_version: String,
     #[serde(default)]
     pub tools: BTreeMap<String, Entry>,
@@ -246,11 +244,6 @@ pub enum DiffMode {
 #[derive(Clone, Debug, Serialize)]
 pub struct Diff {
     pub changes: Vec<Change>,
-    /// Set when the two snapshots were taken over different wires:
-    /// the surfaces are then expected to differ, and the caller is
-    /// told rather than left to infer it from the changes.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub protocol_version_differs: Option<[String; 2]>,
     /// Whether the diff passes under the requested mode.
     pub ok: bool,
 }
@@ -279,17 +272,7 @@ pub fn diff(before: &Snapshot, after: &Snapshot, mode: DiffMode) -> Diff {
             .iter()
             .all(|c| matches!(c.kind, ChangeKind::Added | ChangeKind::Extended)),
     };
-    let protocol_version_differs = (before.protocol_version != after.protocol_version).then(|| {
-        [
-            before.protocol_version.clone(),
-            after.protocol_version.clone(),
-        ]
-    });
-    Diff {
-        changes,
-        protocol_version_differs,
-        ok,
-    }
+    Diff { changes, ok }
 }
 
 fn compare(
@@ -478,21 +461,6 @@ mod tests {
         assert!(d.changes[0].fields.contains(&"description"));
     }
 
-    #[test]
-    fn a_cross_wire_diff_says_so() {
-        let before = tool(Entry::default());
-        let mut after = before.clone();
-        after.protocol_version = "2025-11-25".to_owned();
-        let d = diff(&before, &after, DiffMode::Compatible);
-        // Identical surfaces, so no changes — but the caller is told
-        // the comparison spans two wires rather than having to guess.
-        assert!(d.changes.is_empty());
-        assert_eq!(
-            d.protocol_version_differs,
-            Some(["2026-07-28".to_owned(), "2025-11-25".to_owned()])
-        );
-    }
-
     fn event(entry: EventEntry) -> Snapshot {
         Snapshot {
             protocol_version: "2026-07-28".to_owned(),
@@ -561,7 +529,7 @@ mod tests {
     #[test]
     fn a_snapshot_without_events_still_reads() {
         let old: Snapshot =
-            serde_json::from_value(json!({ "protocol_version": "2025-11-25", "tools": {} }))
+            serde_json::from_value(json!({ "protocol_version": "2026-07-28", "tools": {} }))
                 .unwrap();
         assert!(old.events.is_empty());
         let d = diff(&old, &event(order_event()), DiffMode::Compatible);

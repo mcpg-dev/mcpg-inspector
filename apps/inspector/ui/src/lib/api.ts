@@ -69,7 +69,6 @@ export interface Target {
     url?: string;
     command?: string;
     args?: string[];
-    protocol_version: string;
     bearerConfigured: boolean;
     headers?: Record<string, string>;
   };
@@ -199,7 +198,7 @@ export interface AuthReport {
 export interface CheckResult {
   id: string;
   description: string;
-  outcome: 'pass' | 'fail' | 'skip';
+  outcome: 'pass' | 'fail';
   detail?: string;
 }
 
@@ -207,7 +206,6 @@ export interface CheckReport {
   protocol_version: string;
   passed: number;
   failed: number;
-  skipped: number;
   checks: CheckResult[];
 }
 
@@ -246,8 +244,6 @@ export interface PendingRequest {
   /** `sampling/createMessage`, `elicitation/create`, `roots/list`. */
   method: string;
   params: unknown;
-  /** Which regime produced it — the two differ on timeout and cancellation. */
-  regime: string;
 }
 
 export interface PendingQueue {

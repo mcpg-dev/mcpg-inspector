@@ -7,7 +7,7 @@ import type { Target } from '@/lib/api';
  * This was a sidebar: a permanent 16rem of the window given to a list that
  * usually holds one entry, next to panes whose whole problem is that the
  * useful thing has scrolled off. A picker costs the width of its own label
- * and says the same thing — which server, what wire it negotiated, whether
+ * and says the same thing — which server, which protocol revision it speaks, whether
  * it is up.
  */
 export function TargetPicker({

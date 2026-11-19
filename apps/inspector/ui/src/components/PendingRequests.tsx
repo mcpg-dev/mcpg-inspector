@@ -87,7 +87,6 @@ export function PendingRequests({
         <span className="font-mono text-xs font-medium" data-testid="pending-method">
           {first.method}
         </span>
-        <span className="text-xs text-muted-foreground">{first.regime} wire</span>
         {queue.data && queue.data.pending.length > 1 && (
           <span className="text-xs text-muted-foreground">
             +{queue.data.pending.length - 1} more waiting

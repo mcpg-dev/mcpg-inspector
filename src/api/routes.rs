@@ -189,7 +189,7 @@ async fn meta(State(state): State<ApiState>) -> Json<Value> {
         "version": env!("CARGO_PKG_VERSION"),
         "mode": state.engine.mode(),
         "authMode": state.auth.as_str(),
-        "protocolVersions": ["2025-11-25", "2026-07-28"],
+        "protocolVersions": [mcpg_mcp_wire::v_2026_07_28::wire::SUPPORTED_PROTOCOL_VERSION],
         "ops": Op::ALL.iter().map(|op| op.as_str()).collect::<Vec<_>>(),
     }))
 }
@@ -720,11 +720,6 @@ async fn subscribe(
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
-/// Run the portable protocol checks against a connected target.
-///
-/// Needs a session because the checks are about the wire this target
-/// actually negotiated — a check written for the stateless revision proves
-/// nothing about a server speaking the sessionful one.
 /// What the mcpg gateway behind this target says about itself. Needs a
 /// connected session for the endpoint URL, not for the read — `/runtime` is
 /// unauthenticated, and the point of the panel is the case where the MCP
@@ -749,6 +744,9 @@ async fn gateway(
     ))
 }
 
+/// Run the portable protocol checks against a connected target. Needs a
+/// session because the checks run only against an endpoint whose connect
+/// succeeded.
 async fn checks(
     Workspace(engine): Workspace,
     Path(id): Path<String>,
@@ -768,10 +766,9 @@ async fn checks(
             "the protocol checks probe an HTTP endpoint; a stdio target has none",
         )
     })?;
-    let report =
-        crate::engine::checks::run(url, session.negotiated_version(), entry.spec.allow_private)
-            .await
-            .map_err(|message| fail(StatusCode::BAD_GATEWAY, "checks_failed", &message))?;
+    let report = crate::engine::checks::run(url, entry.spec.allow_private)
+        .await
+        .map_err(|message| fail(StatusCode::BAD_GATEWAY, "checks_failed", &message))?;
     Ok(Json(
         serde_json::to_value(report).unwrap_or_else(|_| json!({})),
     ))
