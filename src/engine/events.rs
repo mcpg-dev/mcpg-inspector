@@ -20,8 +20,8 @@ use std::time::Instant;
 
 use mcpg_mcp_client::tap::{FrameChannel, FrameDirection, FrameTap};
 use mcpg_mcp_wire::v_2026_07_28::extensions::events::wire::{
-    CONTROL_WEBHOOK_ID_PREFIX, ControlEnvelope, MAX_STREAM_HEARTBEAT_MS,
-    METHOD_NOTIFICATIONS_ACTIVE, StreamFrame, WebhookBody, WebhookSecret,
+    CONTROL_WEBHOOK_ID_PREFIX, ControlEnvelope, DEFAULT_HEARTBEAT_MS, METHOD_NOTIFICATIONS_ACTIVE,
+    StreamFrame, WebhookBody, WebhookSecret, is_valid_webhook_id,
 };
 use mcpg_standard_webhooks::{Verifier, WhsecSecret};
 use serde::Serialize;
@@ -122,6 +122,11 @@ pub struct StreamReport {
     pub heartbeats: u64,
     /// The longest time between two data frames, in milliseconds.
     pub longest_gap_ms: u64,
+    /// The heartbeat interval the last `notifications/events/active`
+    /// granted, in milliseconds; `None` before one, or when it named none.
+    pub granted_heartbeat_ms: Option<u64>,
+    /// `active` frames that named no `heartbeatMs`.
+    pub active_without_grant: u64,
     pub first_frame: Option<String>,
     /// Event and heartbeat frames that carried no `cursor` member.
     pub missing_cursor: u64,
@@ -382,7 +387,11 @@ impl StreamTracker {
             Some(StreamFrame::Event(_)) => report.events += 1,
             Some(StreamFrame::Heartbeat { .. }) => report.heartbeats += 1,
             Some(StreamFrame::Terminated(_)) => report.ended_with = Some("terminated".to_owned()),
-            Some(StreamFrame::Active { .. } | StreamFrame::Error(_)) => {}
+            Some(StreamFrame::Active { heartbeat_ms, .. }) => match heartbeat_ms {
+                Some(granted) => report.granted_heartbeat_ms = Some(*granted),
+                None => report.active_without_grant += 1,
+            },
+            Some(StreamFrame::Error(_)) => {}
             None => report.malformed += 1,
         }
         // Read raw: a `null` cursor is an answer, a missing one is not, and
@@ -422,18 +431,18 @@ fn delivery_checks(deliveries: &[Delivery], refused: u64) -> Vec<CheckResult> {
         .filter(|(_, ids)| ids.windows(2).any(|pair| pair[0] != pair[1]))
         .map(|(event_id, _)| *event_id)
         .collect();
-    let foreign: Vec<&str> = deliveries
+    let derived: Vec<&str> = deliveries
         .iter()
-        .filter(|d| d.event_id.as_deref().is_some_and(|id| id != d.webhook_id))
+        .filter(|d| d.event_id.as_deref() == Some(d.webhook_id.as_str()))
         .map(|d| d.webhook_id.as_str())
         .collect();
     let misnamed_controls = deliveries
         .iter()
         .filter(|d| d.event_id.is_none() && !d.webhook_id.starts_with(CONTROL_WEBHOOK_ID_PREFIX))
         .count();
-    let dotted: BTreeSet<&str> = deliveries
+    let unsafe_ids: BTreeSet<&str> = deliveries
         .iter()
-        .filter(|d| d.webhook_id.contains('.'))
+        .filter(|d| !is_valid_webhook_id(&d.webhook_id))
         .map(|d| d.webhook_id.as_str())
         .collect();
     let cursorless = deliveries
@@ -448,10 +457,10 @@ fn delivery_checks(deliveries: &[Delivery], refused: u64) -> Vec<CheckResult> {
             (refused > 0).then(|| format!("{refused} deliveries refused")),
         ),
         check(
-            "events.webhook.id-is-event-id",
-            "an event's webhook-id is its eventId",
-            foreign.is_empty(),
-            (!foreign.is_empty()).then(|| foreign.join(", ")),
+            "events.webhook.id-not-event-id",
+            "an event's webhook-id names the delivered message, not the eventId",
+            derived.is_empty(),
+            (!derived.is_empty()).then(|| derived.join(", ")),
         ),
         check(
             "events.webhook.stable-retries",
@@ -466,11 +475,10 @@ fn delivery_checks(deliveries: &[Delivery], refused: u64) -> Vec<CheckResult> {
             (misnamed_controls > 0).then(|| format!("{misnamed_controls} envelopes")),
         ),
         check(
-            "events.webhook.id-has-no-dot",
-            "no webhook-id contains \".\", as Standard Webhooks requires of a sender (a \
-             Standard Webhooks rule, not an MCP Events one)",
-            dotted.is_empty(),
-            (!dotted.is_empty()).then(|| dotted.into_iter().collect::<Vec<_>>().join(", ")),
+            "events.webhook.id-charset",
+            "every webhook-id is ASCII letters, digits, `_` and `-` only",
+            unsafe_ids.is_empty(),
+            (!unsafe_ids.is_empty()).then(|| unsafe_ids.into_iter().collect::<Vec<_>>().join(", ")),
         ),
         check(
             "events.webhook.cursor",
@@ -498,10 +506,28 @@ fn stream_checks(report: &StreamReport) -> Vec<CheckResult> {
             (report.malformed > 0).then(|| format!("{} frames", report.malformed)),
         ),
         check(
+            "events.stream.heartbeat-grant",
+            "every notifications/events/active grants heartbeatMs",
+            report.active_without_grant == 0,
+            (report.active_without_grant > 0)
+                .then(|| format!("{} active frames without one", report.active_without_grant)),
+        ),
+        check(
             "events.stream.heartbeat",
-            "a data frame at least every 30 s",
-            report.longest_gap_ms <= MAX_STREAM_HEARTBEAT_MS,
-            Some(format!("longest gap {} ms", report.longest_gap_ms)),
+            "a data frame at least every granted heartbeatMs (30 s before a grant)",
+            report.longest_gap_ms
+                <= report
+                    .granted_heartbeat_ms
+                    .unwrap_or(DEFAULT_HEARTBEAT_MS)
+                    // Scheduling slack on either side of the interval.
+                    .saturating_add(1_000),
+            Some(format!(
+                "longest gap {} ms, granted {}",
+                report.longest_gap_ms,
+                report
+                    .granted_heartbeat_ms
+                    .map_or("none".to_owned(), |ms| format!("{ms} ms"))
+            )),
         ),
         check(
             "events.stream.cursor",
@@ -617,9 +643,9 @@ mod tests {
         };
         assert_eq!(outcome("events.webhook.signature"), Outcome::Fail);
         assert_eq!(outcome("events.webhook.stable-retries"), Outcome::Fail);
-        assert_eq!(outcome("events.webhook.id-is-event-id"), Outcome::Fail);
+        assert_eq!(outcome("events.webhook.id-not-event-id"), Outcome::Fail);
         assert_eq!(outcome("events.webhook.control-ids"), Outcome::Pass);
-        assert_eq!(outcome("events.webhook.id-has-no-dot"), Outcome::Pass);
+        assert_eq!(outcome("events.webhook.id-charset"), Outcome::Pass);
         assert_eq!(outcome("events.webhook.cursor"), Outcome::Pass);
 
         assert_eq!(

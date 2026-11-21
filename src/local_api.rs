@@ -334,6 +334,7 @@ impl InspectorApi for LocalApi {
             arguments: event_arguments(args)?,
             cursor: None,
             max_age_ms: None,
+            heartbeat_ms: None,
             meta: None,
         };
         let entry = self.entry(id)?;

@@ -90,6 +90,7 @@ async fn event_stream(
         arguments,
         cursor: query.cursor,
         max_age_ms: None,
+        heartbeat_ms: None,
         meta: None,
     };
     let mut frames = session

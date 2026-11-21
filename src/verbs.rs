@@ -592,6 +592,7 @@ pub fn run_events(args: EventsArgs) -> ! {
                         arguments,
                         cursor: args.cursor,
                         max_age_ms: None,
+                        heartbeat_ms: None,
                         meta: None,
                     };
                 let mut frames = session.open_event_stream(&params).await?;
